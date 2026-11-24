@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { createFileAdjudicator } from './file-adjudicator.js'
 import { createBusinessFileAuthorization } from './file-authorization.js'
+import { createFilePermitGate } from './file-permit-effect.js'
 import { createWorkerFileEffects } from './file-effects.js'
 
 const fields = new Set(['operation', 'path', 'version', 'content'])
@@ -8,15 +9,16 @@ const refused = () => Object.assign(new Error('Business file operation refused')
 const auditUnavailable = () => Object.assign(new Error('File authorization audit unavailable'), { code: 'file-audit-unavailable' })
 
 export function createWorkerFileDispatch({ root, workerOwned, readRules, isAuthorized, adjudicate,
-  maxBytes = 256 * 1024, timeoutMs, ttlMs, maxPending, now, writeAudit } = {}) {
+  maxBytes = 256 * 1024, timeoutMs, ttlMs, maxPending, now, writeAudit, permit } = {}) {
   if (writeAudit !== undefined && typeof writeAudit !== 'function') throw new TypeError('Invalid file audit writer')
+  const confirmPermit = permit === undefined ? undefined : createFilePermitGate(permit)
   const authorization = createBusinessFileAuthorization({ readRules, isAuthorized, ttlMs, maxPending, now })
   const approve = createFileAdjudicator({ authorization, adjudicate, timeoutMs })
   const effects = createWorkerFileEffects({ root, workerOwned, authorization, maxBytes })
 
   // The caller supplies scope from the live dispatch and the expected version
   // from trusted preparation. Tool arguments cannot override the actor or digest.
-  return async function dispatch(scope, input, { context } = {}) {
+  return async function dispatch(scope, input, { context, signal } = {}) {
     if (!scope || !input || Object.keys(input).some(field => !fields.has(field))) throw refused()
     const { personId, botId, roomId, sessionId, requestId, dispatchId } = scope
     const { operation, path, version, content } = input
@@ -35,6 +37,7 @@ export function createWorkerFileDispatch({ root, workerOwned, readRules, isAutho
       } catch { throw auditUnavailable() }
     }) })
     if (!approval) throw refused()
+    if (confirmPermit) await confirmPermit(action, approval, { signal })
     if (!writeAudit) return effects.execute(approval, action, bytes)
 
     const report = async outcome => {
