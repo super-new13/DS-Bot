@@ -38,19 +38,24 @@ export function createWorkerBootstrap({ config, adapter, onReady } = {}) {
   const { ca: caPath, cert: certPath, key: keyPath } = certPaths ?? {}
   if (![caPath, certPath, keyPath].every(absolute)) throw invalid()
   const grants = peerGrants.map(grant => {
-    const { fingerprint, personId, botId, actions: allowed } = grant ?? {}
+    const { fingerprint, personId, botId, roomId, actions: allowed } = grant ?? {}
     if (typeof fingerprint !== 'string' || !/^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$/.test(fingerprint)
-        || !id(personId) || !id(botId) || !Array.isArray(allowed) || !allowed.length
+        || !id(personId) || !id(botId) || (Object.hasOwn(grant ?? {}, 'roomId') && !id(roomId))
+        || !Array.isArray(allowed) || !allowed.length
         || allowed.some(action => !actions.has(action))) throw invalid()
-    return { fingerprint, personId, botId, actions: new Set(allowed) }
+    return { fingerprint, personId, botId, roomId, actions: new Set(allowed) }
   })
-  const matches = (grant, scope) => scope.nodeId === nodeId && grant.personId === scope.personId && grant.botId === scope.botId
+  const allowRooms = grants.some(grant => grant.roomId !== undefined)
+  if (allowRooms && (!absolute(mappingPath) || !absolute(sessionRoot))) throw invalid()
+  const matches = (grant, scope) => scope.nodeId === nodeId && grant.personId === scope.personId
+    && grant.botId === scope.botId && grant.roomId === scope.roomId
   return {
     name: 'enterprise-worker-bootstrap',
     async apply(profile) {
       const [ca, cert, key] = await Promise.all([loadPem(caPath), loadPem(certPath), loadPem(keyPath)])
       return applyWorker(profile, {
         nodeId, provider, model, receiptPath, mappingPath, sessionRoot, initialize, host, port, origin, adapter, onReady, tls: { ca, cert, key },
+        allowRooms,
         authorizePeer: (fingerprint, { scope, action }) => grants.some(grant => grant.fingerprint === fingerprint
           && matches(grant, scope) && grant.actions.has(action)),
         authorizeSession: scope => grants.some(grant => matches(grant, scope)),
