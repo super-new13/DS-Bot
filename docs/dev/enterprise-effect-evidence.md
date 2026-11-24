@@ -1,0 +1,11 @@
+# Evidence at the guarded file effect boundary
+
+The isolated fixture records a completed read or write from the guarded executor's effect observation. The trusted observer holds the producer capability and combines that observation with the exact scope submitted to the reservation service. The effect audit record alone omits the registered target, prior file version, and content digest. After reopening both stores, the authenticated settlement request succeeds only when the scope, evidence ID, and outcome match the persisted evidence.
+
+A production hook can carry the exact confirmed reservation scope into the guarded executor and pass a typed outcome directly to a trusted local producer. A write becomes completed after publication and directory sync. A read becomes completed at the guarded read boundary where the authorization is consumed and the checked bytes become available to the worker. This says nothing about subsequent delivery to the requester. The producer should persist the terminal record before the worker acknowledges the outcome. The current dispatch reports effects through a redacted audit callback and treats post-effect audit failure as an incomplete audit. [Guarded write](../../ds-bot/src/host/enterprise/file-effects.js#L85) · [Guarded read](../../ds-bot/src/host/enterprise/file-effects.js#L123) · [Dispatch observation](../../ds-bot/src/host/enterprise/file-dispatch.js#L43)
+
+Publication and the evidence-store commit are separate operations. A crash between them leaves revocation pending. Emit cancellation or fencing evidence only when a trusted authority can show that the reserved effect has become impossible. Missing acknowledgments and a matching target digest leave attribution unresolved. The fixture models uncertainty both after central reservation and after a committed write whose effect observation could not be persisted. Its settlement endpoint only verifies evidence already stored. [Evidence ingestion](../../ds-bot/src/host/enterprise/file-settlement-evidence.js#L141) · [Settlement verifier](../../ds-bot/src/host/enterprise/file-reservation-http.js#L80)
+
+Run the fixture from the repository root on POSIX.
+
+    node --test ds-bot/test/enterprise-effect-evidence.test.js
