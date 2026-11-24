@@ -118,6 +118,32 @@ mounts the project-scoped `enterprise-employee-data` volume at `/home/node`.
 Keep that volume and project name across starts. The DSH fixture uses separate
 volumes.
 
+### Disposable Compose acceptance
+
+Run these commands from the repository root. Both generate fresh TLS files and
+a temporary pilot configuration. The first validates the rendered Compose
+model without an engine. The second builds and starts a fresh project on a
+local Docker engine. It needs OpenSSL, Docker Compose and a free loopback port
+18443. The build may fetch public packages.
+
+```sh
+node docker/test-enterprise-smoke.mjs --config-only
+node docker/test-enterprise-smoke.mjs --run
+```
+
+The runtime check verifies the pilot page, JavaScript and unauthenticated
+session endpoint using the fixture certificate. It checks that the pilot is
+the project's only container and publishes only loopback HTTPS. The fixture
+has an empty roster and worker list. For mock chat coverage, run the employee
+bootstrap test with its disposable mTLS worker.
+
+```sh
+node --test ds-bot/test/enterprise-employee-bootstrap.test.js
+```
+
+The command removes the temporary project and its volumes on completion.
+An unavailable Docker engine is reported as BLOCKED with exit code 77.
+
 ### Issue an invitation or revoke an account
 
 Stop the employee service and every other writer before starting the offline
