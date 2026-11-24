@@ -29,11 +29,12 @@ async function loadPem(path) {
 // The trusted DSH entry passes its administrator settings and model adapter
 // directly. This snapshots grants for the lifetime of the activated plugin.
 export function createWorkerBootstrap({ config, adapter, onReady } = {}) {
-  const { nodeId, provider, model, receiptPath, initialize = false, host, port, origin, certPaths, peerGrants } = config ?? {}
+  const { nodeId, provider, model, receiptPath, mappingPath, sessionRoot, initialize = false, host, port, origin, certPaths, peerGrants } = config ?? {}
   if (!id(nodeId) || typeof provider !== 'string' || !provider.trim() || typeof model !== 'string' || !model.trim()
       || !absolute(receiptPath) || typeof initialize !== 'boolean' || !Array.isArray(peerGrants) || !peerGrants.length
       || typeof adapter?.stream !== 'function' || typeof adapter.resolveModel !== 'function'
       || (onReady !== undefined && typeof onReady !== 'function')) throw invalid()
+  if ((mappingPath !== undefined || sessionRoot !== undefined) && (!absolute(mappingPath) || !absolute(sessionRoot))) throw invalid()
   const { ca: caPath, cert: certPath, key: keyPath } = certPaths ?? {}
   if (![caPath, certPath, keyPath].every(absolute)) throw invalid()
   const grants = peerGrants.map(grant => {
@@ -49,7 +50,7 @@ export function createWorkerBootstrap({ config, adapter, onReady } = {}) {
     async apply(profile) {
       const [ca, cert, key] = await Promise.all([loadPem(caPath), loadPem(certPath), loadPem(keyPath)])
       return applyWorker(profile, {
-        nodeId, provider, model, receiptPath, initialize, host, port, origin, adapter, onReady, tls: { ca, cert, key },
+        nodeId, provider, model, receiptPath, mappingPath, sessionRoot, initialize, host, port, origin, adapter, onReady, tls: { ca, cert, key },
         authorizePeer: (fingerprint, { scope, action }) => grants.some(grant => grant.fingerprint === fingerprint
           && matches(grant, scope) && grant.actions.has(action)),
         authorizeSession: scope => grants.some(grant => matches(grant, scope)),
