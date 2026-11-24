@@ -127,3 +127,18 @@ test('HTTP errors are typed and do not expose server response bodies', async () 
   await assert.rejects(api.login('alice', 'mock password'), error => error instanceof EnterpriseApiError
     && error.code === 'http-error' && error.status === 429 && !error.message.includes('fixture internal detail'))
 })
+
+test('preserves worker uncertainty from SSE and cancel without resending', async () => {
+  const code = 'worker-outcome-unknown'
+  const outcome = { type: 'error', requestId, code }
+  const calls = []
+  const api = createEmployeeApi({ fetch: async path => {
+    calls.push(path)
+    return path.endsWith('/send') ? eventResponse(frame(queued) + frame(outcome)) : Response.json({ error: code }, { status: 503 })
+  } })
+  const events = []
+  assert.deepEqual(await api.sendPrivate('helper', 'mock chat', { onEvent: event => events.push(event) }), outcome)
+  assert.deepEqual(events, [queued, outcome])
+  await assert.rejects(api.cancelPrivate('helper', requestId), { code, status: 503, requestId })
+  assert.deepEqual(calls, ['/api/enterprise/private-chat/send', '/api/enterprise/private-chat/cancel'])
+})

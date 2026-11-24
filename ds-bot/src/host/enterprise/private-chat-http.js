@@ -10,6 +10,8 @@ const refused = () => error(403, 'Chat request refused')
 const invalid = () => error(400, 'Invalid chat request')
 const denied = () => Object.assign(new Error('Chat request refused'), { code: 'not-authorized' })
 const validId = id => typeof id === 'string' && id.length <= 128 && id.trim() !== ''
+const unknownOutcome = 'worker-outcome-unknown'
+const streamErrors = new Set(['not-authorized', 'queue-full', unknownOutcome])
 const terminalStatuses = new Set(['aborted', 'completed', 'failed'])
 
 function sessionToken(request) {
@@ -154,7 +156,14 @@ export function createEmployeePrivateChatHandler({ accounts, origin, readRoster,
             stream.push({ type: event.type, requestId, text: event.text })
           }
         })
-        if (result?.requestId !== requestId || result.sessionId !== session.scope.sessionId || !terminalStatuses.has(result.status)) throw denied()
+        if (result?.requestId !== requestId || result.sessionId !== session.scope.sessionId
+            || (!terminalStatuses.has(result.status) && result.status !== 'unknown')) {
+          throw Object.assign(new Error('Worker outcome unknown'), { code: unknownOutcome })
+        }
+        if (result.status === 'unknown') {
+          stream.push({ type: 'error', requestId, code: unknownOutcome })
+          return
+        }
         stream.push({ type: 'done', requestId, status: result.status })
       } finally {
         entry.activeScope = undefined
@@ -191,13 +200,21 @@ export function createEmployeePrivateChatHandler({ accounts, origin, readRoster,
         if (!entry?.activeScope || entry.personId !== personId || entry.botId !== botId) return refused()
         const [callerActive, originActive] = await Promise.all([accounts.isSessionActive(identity), accounts.isSessionActive(entry.identity)])
         if (!callerActive || !originActive || !entry.activeScope || !routeStillMatches(entry)) return refused()
+        let result
+        let failure
         try {
-          const result = entry.worker.cancel({ ...entry.activeScope, requestId: entry.requestId })
-          return result?.accepted === true ? Response.json({ accepted: true }, { status: 202, headers }) : refused()
+          result = await entry.worker.cancel({ ...entry.activeScope, requestId: entry.requestId })
         } catch (cause) {
-          if (cause?.code === 'not-authorized') return refused()
-          throw cause
+          failure = { cause }
         }
+        const stillActive = await Promise.all([accounts.isSessionActive(identity), accounts.isSessionActive(entry.identity)])
+        if (!stillActive.every(Boolean) || !routeStillMatches(entry) || request.signal.aborted) return refused()
+        if (failure) {
+          if (failure.cause?.code === 'not-authorized') return refused()
+          if (failure.cause?.code === unknownOutcome) return error(503, unknownOutcome)
+          throw failure.cause
+        }
+        return result?.accepted === true ? Response.json({ accepted: true }, { status: 202, headers }) : refused()
       }
       if (request.signal.aborted) return refused()
       const requestId = randomUUID()
@@ -209,7 +226,7 @@ export function createEmployeePrivateChatHandler({ accounts, origin, readRoster,
       requests.set(requestId, entry)
       stream.push({ type: 'queued', requestId })
       void queue.enqueue({ ...entry, text: body.text })
-        .catch(cause => stream.push({ type: 'error', requestId, code: ['not-authorized', 'queue-full'].includes(cause?.code) ? cause.code : 'unavailable' }))
+        .catch(cause => stream.push({ type: 'error', requestId, code: streamErrors.has(cause?.code) ? cause.code : 'unavailable' }))
         .finally(() => {
           requests.delete(requestId)
           request.signal.removeEventListener('abort', detach)

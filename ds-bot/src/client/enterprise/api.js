@@ -1,6 +1,7 @@
 const prefix = '/api/enterprise/'
 const terminalStatuses = new Set(['completed', 'aborted', 'failed'])
-const streamErrors = new Set(['not-authorized', 'queue-full', 'unavailable'])
+const unknownOutcome = 'worker-outcome-unknown'
+const streamErrors = new Set(['not-authorized', 'queue-full', 'unavailable', unknownOutcome])
 const validId = id => typeof id === 'string' && id.length <= 128 && id.trim() !== ''
 const mediaType = response => response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase()
 
@@ -183,7 +184,12 @@ export function createEmployeeApi({ fetch: fetchRequest = (...args) => globalThi
     },
     sendPrivate,
     async cancelPrivate(botId, requestId, { signal } = {}) {
-      const result = await json(expect(await post('private-chat/cancel', { botId, requestId }, signal), 202))
+      const response = await post('private-chat/cancel', { botId, requestId }, signal)
+      if (response.status === 503) {
+        const failure = await json(response).catch(() => undefined)
+        throw new EnterpriseApiError(failure?.error === unknownOutcome ? unknownOutcome : 'http-error', { status: 503, requestId })
+      }
+      const result = await json(expect(response, 202))
       if (result?.accepted !== true) throw new EnterpriseApiError('invalid-response')
       return { accepted: true }
     },
