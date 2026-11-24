@@ -2,6 +2,7 @@
 // imported by the packaged launcher. Direct invocations run fixture probes.
 import assert from 'node:assert/strict'
 import { X509Certificate } from 'node:crypto'
+import { request } from 'node:https'
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
@@ -20,6 +21,8 @@ const workerOrigin = 'https://worker:9445'
 const host = '0.0.0.0'
 const scope = { nodeId: 'node', personId: 'alice', botId: 'helper' }
 const requestId = 'fixture-request'
+const validEmployeeRequest = id => typeof id === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id)
+const observedRequest = process.argv[3] ?? requestId
 const owns = target => Object.entries(scope).every(([key, value]) => target[key] === value) && target.roomId === null
 const root = state('owned')
 const path = join(root, 'note')
@@ -113,7 +116,8 @@ async function workerOptions() {
       certPaths: { ca: config('ca.pem'), cert: config('worker-server.pem'), key: config('worker-server.key') },
       peerGrants: [{ fingerprint: fingerprint('controller'), personId: scope.personId, botId: scope.botId, actions: ['create', 'submit'] }],
     },
-    fileTools: { root, path, workerOwned: true, isAuthorized: target => target.requestId === requestId,
+    fileTools: { root, path, workerOwned: true, isAuthorized: target => process.env.DSBOT_SMOKE_EMPLOYEE === '1'
+      ? validEmployeeRequest(target.requestId) : target.requestId === requestId,
       permit: { nodeId: scope.nodeId, targetId: 'note', path, client: reservations },
       readRules: () => ({ version: 'v1', rules: [{ id: 'edit', personId: scope.personId, botId: scope.botId, roomId: null,
         directory: root, grant: 'write', effect: 'allow', purpose: 'Update the fixture note',
@@ -142,7 +146,7 @@ async function verifyWorker(phase) {
     const outbox = entries('outbox.json')
     assert.equal(outbox.length, 1)
     const [proof] = outbox
-    assert.equal(proof.scope.requestId, requestId)
+    assert.equal(proof.scope.requestId, observedRequest)
     assert.ok(owns(proof.scope))
     const { createFileEvidenceTlsClient } = await load('file-evidence-tls')
     const ordinary = createFileEvidenceTlsClient({ origin: evidenceOrigin, ...tls('reservation-client') })
@@ -161,6 +165,32 @@ async function verifyWorker(phase) {
   }
 }
 
+async function seedInvite() {
+  const base = '/opt/dsh-template/profiles/web/node_modules/ds-bot/src/host/enterprise/'
+  const { openEmployeeAccountStore } = await import(base + 'account-store.js')
+  const { createEmployeeAccounts } = await import(base + 'accounts.js')
+  const { accountFile } = JSON.parse(readFileSync(config('config.json'), 'utf8'))
+  const store = await openEmployeeAccountStore(accountFile, { initialize: true })
+  const result = await createEmployeeAccounts(store).issueInvite(scope.personId)
+  if (!result?.token) throw new Error('Fixture invitation could not be provisioned')
+  process.stdout.write(result.token + '\n')
+}
+
+async function employeeReady() {
+  const { https } = JSON.parse(readFileSync(config('config.json'), 'utf8'))
+  const origin = new URL(https.origin)
+  await new Promise((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port: https.port, path: '/', ca: readFileSync(config('ca.pem')),
+      signal: AbortSignal.timeout(2000), headers: { host: origin.host } }, res => {
+      res.resume()
+      if (res.statusCode === 200) resolve()
+      else reject(new Error('Employee fixture is not ready'))
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+
 const action = process.argv[2]
 let options
 if (role === action && process.argv[3] === '--config') {
@@ -168,6 +198,8 @@ if (role === action && process.argv[3] === '--config') {
   options = await (role === 'policy' ? policyOptions() : workerOptions())
 }
 else if (action === 'ready') assert.equal(readFileSync(readyFile, 'utf8'), 'ready')
+else if (role === 'employee' && action === 'seed-invite') await seedInvite()
+else if (role === 'employee' && action === 'employee-ready') await employeeReady()
 else if (role === 'controller' && action === 'submit') await submit()
 else if (role === 'policy' && action === 'revoke-pending') assert.equal(await command('revoke'), 'pending')
 else if (role === 'policy' && action === 'revoke-complete') {
@@ -175,7 +207,7 @@ else if (role === 'policy' && action === 'revoke-complete') {
   const evidence = entries('evidence.json')
   assert.equal(evidence.length, 1)
   assert.ok(owns(evidence[0].scope))
-  assert.equal(evidence[0].scope.requestId, requestId)
+  assert.equal(evidence[0].scope.requestId, observedRequest)
 } else if (role === 'worker' && action === 'drain') assert.deepEqual(await command('drain'), { acknowledged: 1 })
 else if (role === 'worker' && ['verify-write', 'verify-pending', 'verify-settled'].includes(action)) await verifyWorker(action)
 else throw new Error('Unknown smoke fixture role or operation')

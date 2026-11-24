@@ -1,25 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Run from the repository root. --config-only renders without contacting Docker Engine.
-[[ $# -eq 0 || ( $# -eq 1 && $1 == --config-only ) ]] || exit 2
+set +x
+employee=0
+config_only=0
+for option in "$@"; do
+  case "$option" in
+    --employee) employee=1 ;;
+    --config-only) config_only=1 ;;
+    *) printf 'Usage: %s [--employee] [--config-only]\n' "$0" >&2; exit 2 ;;
+  esac
+done
 [[ -f compose.enterprise.yml && -f docker/enterprise-policy-smoke.mjs ]] || exit 2
 umask 077
 scratch=$(mktemp -d /tmp/dsbot-policy-smoke.XXXXXXXX)
 export DSBOT_FILE_POLICY_CONFIG_DIR="$scratch/policy" DSBOT_WORKER_CONFIG_DIR="$scratch/worker"
 started=0
+extra_files=()
+extra_profiles=()
+if [[ $employee == 1 ]]; then
+  extra_files=(-f "$scratch/employee-ports.yml")
+  extra_profiles=(--profile employee-pilot)
+fi
 compose() {
-  docker compose --env-file /dev/null -p "$project" -f compose.enterprise.yml -f "$scratch/fixture.json" "$@"
+  docker compose --env-file /dev/null -p "$project" -f compose.enterprise.yml -f "$scratch/fixture.json" ${extra_files[@]+"${extra_files[@]}"} "$@"
 }
 cleanup() {
   local rc=$?
   trap - EXIT
   trap '' HUP INT TERM
   if [[ $started == 1 ]]; then
-    if ! compose --profile file-policy --profile worker --profile smoke down --volumes --remove-orphans; then
-      printf 'Cleanup failed for disposable project %s. Retry its Compose down command with %s/fixture.json.\n' "$project" "$scratch" >&2
+    if ! compose --profile file-policy --profile worker --profile smoke ${extra_profiles[@]+"${extra_profiles[@]}"} down --volumes --remove-orphans; then
+      printf 'Cleanup failed for disposable project %s. Retry its Compose down command with the overlays in %s.\n' "$project" "$scratch" >&2
       exit 1
     fi
     docker image rm "$project:local" >/dev/null 2>&1 || true
+    if [[ $employee == 1 ]]; then docker image rm "$project:employee" >/dev/null 2>&1 || true; fi
   fi
   [[ $scratch == /tmp/dsbot-policy-smoke.???????? && -d $scratch ]] && rm -rf -- "$scratch"
   exit "$rc"
@@ -63,7 +79,50 @@ cat > "$scratch/fixture.json" <<JSON
   "smoke-controller":{"profiles":["smoke"],"image":"$project:local","pull_policy":"never","user":"1000:1000","read_only":true,"cap_drop":["ALL"],"networks":["file-operations"],"entrypoint":["node","/app/config/controller.mjs","submit"],"volumes":[{"type":"bind","source":"$scratch/controller","target":"/app/config","read_only":true,"bind":{"create_host_path":false}}]}
 }}
 JSON
-compose --profile file-policy --profile worker --profile smoke config --format json | python3 -c '
+if [[ $employee == 1 ]]; then
+  mkdir "$scratch/employee"
+  export DSBOT_ENTERPRISE_CONFIG_DIR="$scratch/employee"
+  issue employee "$scratch/employee" $'extendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1'
+  cp "$scratch/controller/controller.pem" "$scratch/controller/controller.key" "$scratch/ca/ca.pem" "$scratch/employee/"
+  cp docker/enterprise-policy-smoke.mjs "$scratch/employee/employee.mjs"
+  chmod 755 "$scratch/employee"
+  chmod 644 "$scratch/employee/"*
+  employee_port=$(python3 - "$scratch" "$project" <<'PYCONFIG'
+import json
+import pathlib
+import socket
+import sys
+
+scratch = pathlib.Path(sys.argv[1])
+project = sys.argv[2]
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+mount = "/run/dsbot-enterprise/"
+config = dict(accountFile="/home/node/smoke-accounts.json", https=dict(
+    host="0.0.0.0", port=8443, origin=f"https://127.0.0.1:{port}",
+    certFile=mount + "employee.pem", keyFile=mount + "employee.key"),
+    workers=[dict(nodeId="node", origin="https://worker:9445", caFile=mount + "ca.pem",
+                  certFile=mount + "controller.pem", keyFile=mount + "controller.key")],
+    limits=dict(maxActive=1, maxPerBot=1, maxPerNode=1, maxPending=2),
+    roster=dict(people={"alice": dict(id="alice", name="Alice", botIds=["helper"])},
+                bots={"helper": dict(id="helper", nodeId="node")}, rooms={}))
+config_path = scratch / "employee/config.json"
+config_path.write_text(json.dumps(config))
+config_path.chmod(0o644)
+fixture = scratch / "fixture.json"
+model = json.loads(fixture.read_text())
+model["services"]["worker"]["environment"] = {"DSBOT_SMOKE_EMPLOYEE": "1"}
+model["services"]["employee-pilot"] = dict(image=project + ":employee", networks=["file-operations"],
+    healthcheck=dict(test=["CMD", "node", mount + "employee.mjs", "employee-ready"], interval="1s", timeout="3s", retries=30))
+fixture.write_text(json.dumps(model))
+# An override replaces the default pilot port instead of adding another mapping.
+(scratch / "employee-ports.yml").write_text(f'services:\n  employee-pilot:\n    ports: !override ["127.0.0.1:{port}:8443"]\n')
+print(port)
+PYCONFIG
+  )
+fi
+compose --profile file-policy --profile worker --profile smoke ${extra_profiles[@]+"${extra_profiles[@]}"} config --format json | python3 -c '
 import json, sys
 m = json.load(sys.stdin)
 assert m["networks"]["file-operations"]["internal"]
@@ -73,17 +132,36 @@ for role in ("file-policy", "worker", "smoke-controller"):
     assert list(s["networks"]) == ["file-operations"]
     assert s["volumes"][0]["read_only"]
 assert not m["services"]["dsh"].get("ports")
-print("Rendered roles use a private network and publish zero ports")'
-[[ $# == 0 ]] || exit 0
+if "employee-pilot" in m["services"]:
+    entry = m["services"]["employee-pilot"]
+    port, = entry["ports"]
+    assert port["host_ip"] == "127.0.0.1" and port["target"] == 8443
+    assert str(port["published"]) == sys.argv[1]
+    assert set(entry["networks"]) == {"employee-edge", "file-operations"}
+    assert entry["volumes"][0]["read_only"]
+    print("Employee HTTPS is the only published port and binds to loopback")
+else:
+    print("Rendered roles use a private network and publish zero ports")' "${employee_port:-}"
+[[ $config_only == 0 ]] || exit 0
 docker version --format '{{.Server.Version}}'
 started=1
 compose build file-policy
 compose up -d --no-build --wait --wait-timeout 45 file-policy worker
-compose run --rm --no-deps smoke-controller
-compose exec -T worker node /app/config/worker.mjs verify-write
+if [[ $employee == 1 ]]; then
+  compose build employee-pilot
+  compose run --rm -T --no-deps --entrypoint node employee-pilot \
+    /run/dsbot-enterprise/employee.mjs seed-invite > "$scratch/invite"
+  compose up -d --no-build --wait --wait-timeout 45 employee-pilot
+  python3 docker/enterprise-employee-smoke.py "$scratch" "$employee_port" > "$scratch/request-id"
+  IFS= read -r request_id < "$scratch/request-id"
+else
+  compose run --rm --no-deps smoke-controller
+  request_id=fixture-request
+fi
+compose exec -T worker node /app/config/worker.mjs verify-write "$request_id"
 compose exec -T file-policy node /app/config/policy.mjs revoke-pending
 compose exec -T worker node /app/config/worker.mjs verify-pending
 compose exec -T worker node /app/config/worker.mjs drain
-compose exec -T file-policy node /app/config/policy.mjs revoke-complete
+compose exec -T file-policy node /app/config/policy.mjs revoke-complete "$request_id"
 compose exec -T worker node /app/config/worker.mjs verify-settled
 printf 'Guarded write, pending revocation, credential separation, and exact settlement passed.\n'
