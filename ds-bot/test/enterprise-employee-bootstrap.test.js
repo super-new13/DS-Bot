@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { X509Certificate } from 'node:crypto'
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, rm, watch, writeFile } from 'node:fs/promises'
 import { request } from 'node:https'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -80,9 +80,9 @@ async function fixture(t) {
   async function save(value = config) {
     await writeFile(configFile, JSON.stringify(value))
   }
-  async function start() {
+  async function start(options) {
     await save()
-    const runtime = await startEmployeeDeployment(configFile)
+    const runtime = await startEmployeeDeployment(configFile, options)
     listeners.push(runtime)
     return runtime
   }
@@ -147,7 +147,7 @@ test('invalid configuration fails before account initialization', { timeout: 150
     [value => { value.workers[0].origin = 'http://127.0.0.1' }, /workers/],
     [value => { value.workers.push(value.workers[0]) }, /duplicate worker node/],
     [value => { value.roster.bots.helper.nodeId = 'missing' }, /Bot worker mapping/],
-    [value => { value.roster.rooms.general = {} }, /empty rooms table/],
+    [value => { value.roster.rooms.general = {} }, /rooms require group storage/],
     [value => { value.limits.maxPending = -1 }, /dispatch limits/],
     [value => { delete value.initializeAccounts }, /ENOENT/],
   ]
@@ -158,4 +158,63 @@ test('invalid configuration fails before account initialization', { timeout: 150
     await assert.rejects(startEmployeeDeployment(configFile), error)
     await assert.rejects(access(config.accountFile), { code: 'ENOENT' })
   }
+})
+
+test('configured room submits through a separate executor and retains scoped HTTPS history on restart', { timeout: 15000 }, async t => {
+  const { config, configFile, file, save, start, call, scopes } = await fixture(t)
+  config.roster.people.outside = { id: 'outside', name: 'Outside', botIds: [] }
+  config.roster.people.employee.botIds = []
+  config.roster.rooms.general = { id: 'general', people: ['employee'], members: ['helper'] }
+  config.groups = { directory: file('rooms'), limits: { maxActive: 1, maxPending: 2, maxPendingPerRoom: 1 } }
+  await save()
+  await assert.rejects(startEmployeeDeployment(configFile), /trusted room executor required/)
+  await assert.rejects(access(config.accountFile), { code: 'ENOENT' })
+  await mkdir(config.groups.directory, { mode: 0o700 })
+  const executions = []
+  const options = { async executeRoom(input) {
+    executions.push(input)
+    return { by: 'helper', name: 'Helper', roomId: input.roomId, text: 'Room reply' }
+  } }
+  const runtime = await start(options)
+  async function login(personId) {
+    const password = 'disposable group fixture password'
+    const { token } = await runtime.accounts.issueInvite(personId)
+    assert.equal((await call(runtime, auth + 'redeem', { json: { token, password } })).status, 204)
+    const result = await call(runtime, auth + 'login', { json: { personId, password } })
+    assert.equal(result.status, 204)
+    return result.headers['set-cookie'][0].split(';', 1)[0]
+  }
+  const member = await login('employee')
+  const outsider = await login('outside')
+  const room = '/api/enterprise/group-chat/general/'
+  assert.equal((await call(runtime, room + 'history', { cookie: outsider })).status, 403)
+  assert.equal((await call(runtime, room + 'send', { cookie: outsider, json: { text: 'ignored' } })).status, 403)
+  assert.equal((await call(runtime, '/api/enterprise/group-chat/other/history', { cookie: member })).status, 403)
+  assert.equal((await call(runtime, '/api/enterprise/private-chat/send', { cookie: member, json: { botId: 'helper', text: 'private' } })).status, 403)
+  const events = watch(config.groups.directory, { signal: AbortSignal.timeout(3000) })
+  const firstEvent = events.next()
+  try {
+    const result = await call(runtime, room + 'send', { cookie: member, json: { text: 'Room message' } })
+    assert.equal(result.status, 202)
+    const { requestId } = JSON.parse(result.text)
+    let next = await firstEvent
+    while (!/^room-.*[.]json$/.test(next.value?.filename ?? '')) {
+      assert.equal(next.done, false)
+      next = await events.next()
+    }
+    assert.deepEqual(executions, [{ roomId: 'general', requestId, text: 'Room message',
+      source: { by: 'employee', name: 'Employee', via: 'DS Bot web' }, room: config.roster.rooms.general,
+    }])
+  } finally { await events.return() }
+  const before = await call(runtime, room + 'history', { cookie: member })
+  assert.equal(before.status, 200)
+  assert.deepEqual(JSON.parse(before.text), { roomId: 'general', messages: [
+    { kind: 'user', text: 'Room message', by: 'employee', name: 'Employee' },
+    { kind: 'bot', text: 'Room reply', by: 'helper', name: 'Helper' },
+  ] })
+  await runtime.close()
+  config.initializeAccounts = false
+  const restored = await start(options)
+  assert.equal((await call(restored, room + 'history', { cookie: member })).text, before.text)
+  assert.deepEqual(scopes, [])
 })

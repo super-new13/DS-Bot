@@ -4,6 +4,8 @@ import { isIP } from 'node:net'
 import { isAbsolute } from 'node:path'
 import { createSecureContext } from 'node:tls'
 import { startEmployeeRuntime } from './employee-runtime.js'
+import { createEmployeeGroupRuntime } from './group-runtime.js'
+import { openEmployeeGroupStore } from './group-store.js'
 import { createRemoteWorkerAdapter } from './remote-adapter.js'
 import { createEnterpriseRuntimeRoster } from './runtime-roster.js'
 import { createWorkerClient } from './worker-client.js'
@@ -23,9 +25,10 @@ const absolute = value => typeof value === 'string' && isAbsolute(value) && !val
 const id = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value)
 const origin = value => typeof value === 'string' && value.startsWith('https://') && URL.parse(value)?.origin === value
 const limitsKeys = ['maxActive', 'maxPerBot', 'maxPerNode', 'maxPending']
+const groupLimits = ['maxActive', 'maxPending', 'maxPendingPerRoom']
 
 function check(config) {
-  if (!exact(config, ['accountFile', 'https', 'workers', 'roster', 'limits'], ['initializeAccounts'])) throw invalid('root')
+  if (!exact(config, ['accountFile', 'https', 'workers', 'roster', 'limits'], ['initializeAccounts', 'groups'])) throw invalid('root')
   const { accountFile, initializeAccounts, https, workers, roster, limits } = config
   if (!absolute(accountFile) || (initializeAccounts !== undefined && typeof initializeAccounts !== 'boolean')) throw invalid('accounts')
   if (!exact(https, ['origin', 'host', 'port', 'certFile', 'keyFile']) || !origin(https.origin)
@@ -34,7 +37,14 @@ function check(config) {
   if (!exact(limits, limitsKeys) || !limitsKeys.every(key => Number.isSafeInteger(limits[key]) && limits[key] >= (key === 'maxPending' ? 0 : 1))) {
     throw invalid('dispatch limits')
   }
-  if (!exact(roster, ['people', 'bots', 'rooms']) || !exact(roster.rooms, [])) throw invalid('pilot roster requires an empty rooms table')
+  if (!exact(roster, ['people', 'bots', 'rooms']) || !roster.rooms || typeof roster.rooms !== 'object'
+      || Array.isArray(roster.rooms)) throw invalid('rooms table')
+  if (config.groups === undefined && Object.keys(roster.rooms).length) throw invalid('rooms require group storage')
+  if (config.groups !== undefined && (!exact(config.groups, ['directory'], ['limits']) || !absolute(config.groups.directory)
+      || (config.groups.limits !== undefined && (!exact(config.groups.limits, groupLimits)
+        || !groupLimits.every(key => Number.isSafeInteger(config.groups.limits[key]) && config.groups.limits[key] > 0))))) {
+    throw invalid('group storage or limits')
+  }
   if (!Array.isArray(workers) || !workers.every(worker => exact(worker, ['nodeId', 'origin', 'caFile', 'certFile', 'keyFile'])
       && id(worker.nodeId) && origin(worker.origin) && [worker.caFile, worker.certFile, worker.keyFile].every(absolute))) {
     throw invalid('workers')
@@ -66,12 +76,13 @@ async function loadTls({ caFile, certFile, keyFile }, role) {
 
 // The operator supplies a trusted JSON file. Settings and TLS material are loaded
 // once per start. Account mutations remain available through the returned service.
-export async function startEmployeeDeployment(configFile) {
+export async function startEmployeeDeployment(configFile, { executeRoom } = {}) {
   if (!absolute(configFile)) throw invalid('expected an absolute JSON file path')
   let config
   try { config = JSON.parse(await readFile(configFile, 'utf8')) } catch { throw invalid('could not read JSON file') }
   check(config)
-  const { accountFile, initializeAccounts, https, roster, limits } = config
+  const { accountFile, initializeAccounts, https, roster, limits, groups } = config
+  if (groups !== undefined && typeof executeRoom !== 'function') throw invalid('trusted room executor required')
   const workers = new Map()
   const readConfig = () => roster
   const snapshot = createEnterpriseRuntimeRoster({ readConfig, workers }).readRoster()
@@ -86,7 +97,20 @@ export async function startEmployeeDeployment(configFile) {
     const client = createWorkerClient({ origin, nodeId, transport })
     workers.set(nodeId, createRemoteWorkerAdapter({ client, nodeId }))
   }
+  const groupRuntime = groups === undefined ? undefined : createEmployeeGroupRuntime({
+    ...groups.limits, store: await openEmployeeGroupStore(groups.directory),
+    async execute(input) {
+      const room = snapshot.rooms[input.roomId]
+      if (!room?.people.includes(input.source.by)) throw invalid('room execution scope')
+      // Room execution receives only room data and original actor attribution.
+      const reply = await executeRoom(Object.freeze({ ...input, room }))
+      if (reply !== undefined && (reply?.roomId !== room.id || !room.members.includes(reply.by))) {
+        throw invalid('room reply scope')
+      }
+      return reply
+    },
+  })
   return startEmployeeRuntime({ accountFile, initializeAccounts, readConfig, workers, limits,
     https: { origin: https.origin, host: https.host, port: https.port, tls },
-    readHistory: () => undefined, enqueueGroup: () => false })
+    readHistory: groupRuntime?.readHistory ?? (() => undefined), enqueueGroup: groupRuntime?.enqueue ?? (() => false) })
 }
