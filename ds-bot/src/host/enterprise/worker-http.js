@@ -13,7 +13,7 @@ const json = (status, value, extra) => Response.json(value, { status, headers: {
 const error = (status, code, extra) => json(status, { error: code }, extra)
 const refused = () => error(403, 'worker-refused')
 const validId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value)
-const matches = (a, b) => ['nodeId', 'botId', 'personId', 'sessionId'].every(key => a[key] === b[key])
+const matches = (a, b) => ['nodeId', 'botId', 'personId', 'sessionId', 'roomId'].every(key => a[key] === b[key])
 
 async function readBody(request, limit) {
   if (request.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() !== 'application/json'
@@ -94,9 +94,9 @@ function liveReply(authorized) {
 // node, actor, Bot, Session and action grants against authoritative state.
 // The worker context must already enforce its execution and tool boundary.
 export function createWorkerHttpHandler({ nodeId, origin, authenticatePeer, authorizePeer, worker, receipts,
-  maxBodyBytes = 16384, maxActive = 4 }) {
+  maxBodyBytes = 16384, maxActive = 4, allowRooms = false }) {
   if (!validId(nodeId) || new URL(origin).origin !== origin || !origin.startsWith('https://')
-      || typeof authenticatePeer !== 'function' || typeof authorizePeer !== 'function'
+      || typeof authenticatePeer !== 'function' || typeof authorizePeer !== 'function' || typeof allowRooms !== 'boolean'
       || !Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1 || maxBodyBytes > 65536
       || !Number.isSafeInteger(maxActive) || maxActive < 1) throw new TypeError('Invalid worker HTTP configuration')
   const active = new Map()
@@ -178,24 +178,28 @@ export function createWorkerHttpHandler({ nodeId, origin, authenticatePeer, auth
       if (peer === undefined || peer === null || peer === false) return refused()
       const body = await readBody(request, maxBodyBytes)
       if (body instanceof Response) return body
-      if (Object.keys(body).length !== fields.length || !fields.every(key => Object.hasOwn(body, key)
+      const scopedFields = Object.hasOwn(body, 'roomId') ? [...fields, 'roomId'] : fields
+      if (Object.keys(body).length !== scopedFields.length || !scopedFields.every(key => Object.hasOwn(body, key)
           && (key === 'text' ? typeof body.text === 'string' && body.text.trim() !== '' : validId(body[key])))) {
         return error(400, 'invalid-request')
       }
-      if (body.nodeId !== nodeId) return refused()
-      const { botId, personId, sessionId, requestId, text } = body
-      const scope = Object.freeze({ nodeId, botId, personId, ...(sessionId === undefined ? {} : { sessionId }) })
+      // Room operations require room-aware authorization and Session ownership.
+      if (body.nodeId !== nodeId || (Object.hasOwn(body, 'roomId') && !allowRooms)) return refused()
+      const { botId, personId, sessionId, roomId, requestId, text } = body
+      const room = roomId === undefined ? {} : { roomId }
+      const scope = Object.freeze({ nodeId, botId, personId, ...room, ...(sessionId === undefined ? {} : { sessionId }) })
       const target = Object.freeze({ action, scope, requestId })
       const permitted = () => {
         try { return authorizePeer(peer, target) === true } catch { return false }
       }
       if (!permitted()) return refused()
-      const adapterScope = { botId, personId, sessionId, sessionKey: JSON.stringify([nodeId, botId, personId]) }
+      const sessionKey = JSON.stringify(roomId === undefined ? [nodeId, botId, personId] : ['room', nodeId, botId, roomId])
+      const adapterScope = { botId, personId, sessionId, sessionKey, ...room }
       if (action === 'create') {
         const created = await worker.create(adapterScope)
         if (!permitted()) return refused()
         if (!validId(created?.sessionId) || created.personId !== personId || created.botId !== botId
-            || created.sessionKey !== adapterScope.sessionKey) return error(503, 'worker-unavailable')
+            || created.roomId !== roomId || created.sessionKey !== sessionKey) return error(503, 'worker-unavailable')
         return json(201, { sessionId: created.sessionId })
       }
       if (action === 'submit') return await submit(scope, adapterScope, requestId, text, permitted)

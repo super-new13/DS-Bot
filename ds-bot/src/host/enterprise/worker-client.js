@@ -90,11 +90,12 @@ export function createWorkerClient({ origin, nodeId, transport, maxFrameBytes = 
       || !Number.isSafeInteger(maxStreamBytes) || maxStreamBytes < maxFrameBytes) throw new TypeError('Invalid worker client configuration')
 
   function scoped(scope, needsSession = true) {
-    const { nodeId: requestedNode, botId, personId, sessionId } = scope ?? {}
-    if (requestedNode !== nodeId || !validId(botId) || !validId(personId) || (needsSession && !validId(sessionId))) {
+    const { nodeId: requestedNode, botId, personId, sessionId, roomId } = scope ?? {}
+    if (requestedNode !== nodeId || !validId(botId) || !validId(personId) || (needsSession && !validId(sessionId))
+        || (Object.hasOwn(scope ?? {}, 'roomId') && !validId(roomId))) {
       throw new TypeError('Invalid worker scope')
     }
-    return { nodeId, botId, personId, ...(needsSession ? { sessionId } : {}) }
+    return { nodeId, botId, personId, ...(roomId === undefined ? {} : { roomId }), ...(needsSession ? { sessionId } : {}) }
   }
 
   function operation(scope, requestId) {

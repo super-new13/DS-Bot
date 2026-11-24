@@ -157,3 +157,30 @@ test('worker client never resubmits after transport loss and rejects a foreign r
   assert.deepEqual(await client.status(scope, requestId), { requestId, status: 'unknown' })
   assert.deepEqual(calls, ['submit', 'status'])
 })
+
+test('worker client carries the room and actor separately on every wire action', async () => {
+  const calls = []
+  const room = { ...scope, roomId: 'general' }
+  const client = createWorkerClient({ nodeId: scope.nodeId, origin, async transport(request) {
+    const action = new URL(request.url).pathname.split('/').at(-1)
+    calls.push([action, await request.json()])
+    if (action === 'create') return Response.json({ sessionId: scope.sessionId }, { status: 201 })
+    if (action === 'cancel') return Response.json({ accepted: true }, { status: 202 })
+    return Response.json({ receipt: completed })
+  } })
+  await client.create(room)
+  await client.submit(room, requestId, 'room prompt')
+  await client.status(room, requestId)
+  await client.cancel(room, requestId)
+  const { sessionId, ...creation } = room
+  assert.deepEqual(calls, [
+    ['create', creation], ['submit', { ...room, requestId, text: 'room prompt' }],
+    ['status', { ...room, requestId }], ['cancel', { ...room, requestId }],
+  ])
+  for (const roomId of ['', null, '../general', undefined]) {
+    assert.throws(() => client.create({ ...room, roomId }), TypeError)
+    await assert.rejects(client.submit({ ...room, roomId }, requestId, 'room prompt'), TypeError)
+  }
+  await client.create(scope)
+  assert.deepEqual(calls.at(-1), ['create', { nodeId: scope.nodeId, botId: scope.botId, personId: scope.personId }])
+})

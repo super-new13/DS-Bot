@@ -165,3 +165,112 @@ test('revoked peer cannot read queued stream frames or submit another action', {
   assert.equal((await call('cancel', keys)).status, 403)
   gate.resolve('completed')
 })
+
+test('room routing shares a Session key while receipts and cancellation remain actor scoped', { timeout: 3000 }, async () => {
+  const { receipts } = await fixture()
+  const calls = []
+  const grants = []
+  const gate = Promise.withResolvers()
+  const expectedKey = JSON.stringify(['room', scope.nodeId, scope.botId, 'general'])
+  const room = { ...scope, roomId: 'general' }
+  const bob = { ...room, personId: 'bob' }
+  const handle = createWorkerHttpHandler({ nodeId: scope.nodeId, origin, receipts, allowRooms: true,
+    authenticatePeer: peer => peer === transport ? 'controller' : undefined,
+    authorizePeer(peer, { scope: target }) {
+      grants.push(target)
+      return peer === 'controller' && [undefined, 'general', 'adjacent'].includes(target.roomId)
+    },
+    worker: {
+      create(input) {
+        calls.push(input)
+        return { ...input, sessionId: input.sessionKey === expectedKey ? 'shared' : 'private' }
+      },
+      async submit(input) {
+        calls.push(input)
+        if (input.sessionKey !== expectedKey || input.sessionId !== 'shared') throw new Error('Scope mismatch')
+        const status = await gate.promise
+        return { ...input, status }
+      },
+      cancel(input) {
+        calls.push(input)
+        gate.resolve('aborted')
+        return { accepted: true }
+      },
+    },
+  })
+  const call = (action, payload) => handle(request(action, payload), transport)
+  for (const roomId of ['', null, '../general', 1]) {
+    assert.equal((await call('create', { ...scope, roomId })).status, 400)
+  }
+  assert.equal(grants.length, 0)
+  for (const actor of [room, bob]) {
+    const response = await call('create', actor)
+    assert.equal(response.status, 201)
+    assert.deepEqual(await response.json(), { sessionId: 'shared' })
+    assert.equal(calls.at(-1).sessionKey, expectedKey)
+    assert.equal(calls.at(-1).personId, actor.personId)
+    assert.deepEqual(grants.at(-1), actor)
+  }
+  assert.deepEqual(await (await call('create', scope)).json(), { sessionId: 'private' })
+  assert.deepEqual(calls.at(-1), { botId: scope.botId, personId: scope.personId, sessionId: undefined,
+    sessionKey: JSON.stringify([scope.nodeId, scope.botId, scope.personId]),
+  })
+  const active = { ...room, sessionId: 'shared', requestId: 'active-room' }
+  const response = await call('submit', { ...active, text: 'room prompt' })
+  assert.equal(response.status, 202)
+  const reader = response.body.getReader()
+  assert.equal((await readFrame(reader)).receipt.status, 'admitted')
+  assert.equal((await call('status', active)).status, 200)
+  const privateScope = { ...scope, sessionId: active.sessionId, requestId: active.requestId }
+  const foreignScopes = [{ ...active, personId: 'bob' }, privateScope,
+    { ...active, sessionId: 'private' }, { ...active, roomId: 'adjacent' },
+  ]
+  for (const foreign of foreignScopes) {
+    assert.equal((await call('status', foreign)).status, 404)
+    assert.equal((await call('cancel', foreign)).status, 403)
+    assert.equal((await call('submit', { ...foreign, text: 'room prompt' })).status, 409)
+  }
+  const foreignRoom = { ...active, roomId: 'other' }
+  assert.equal((await call('status', foreignRoom)).status, 403)
+  assert.equal((await call('cancel', foreignRoom)).status, 403)
+  assert.equal((await call('cancel', active)).status, 202)
+  assert.equal(calls.at(-1).personId, 'alice')
+  assert.equal(calls.at(-1).roomId, room.roomId)
+  assert.equal((await readFrame(reader)).receipt.status, 'aborted')
+  assert.equal(await readFrame(reader), undefined)
+  assert.equal((await call('status', { ...active, personId: 'bob' })).status, 404)
+  const next = { ...active, personId: 'bob', requestId: 'bob-room-request' }
+  const nextResponse = await call('submit', { ...next, text: 'second actor' })
+  assert.equal(nextResponse.status, 202)
+  await nextResponse.text()
+  assert.equal(calls.at(-1).sessionKey, expectedKey)
+  assert.equal(calls.at(-1).personId, 'bob')
+  assert.equal((await call('status', next)).status, 200)
+  assert.equal((await call('status', { ...next, personId: 'alice' })).status, 404)
+})
+
+test('private-only worker refuses valid room actions before authorization or storage', async () => {
+  const calls = []
+  const record = name => () => { calls.push(name); return true }
+  const options = {
+    nodeId: scope.nodeId, origin,
+    authenticatePeer: peer => peer === transport ? 'controller' : undefined,
+    authorizePeer: record('authorizePeer'),
+    worker: { create: record('create'), submit: record('submit'), cancel: record('cancel') },
+    receipts: { lookup: record('lookup'), admit: record('admit'), finish: record('finish') },
+  }
+  assert.throws(() => createWorkerHttpHandler({ ...options, allowRooms: 'true' }), /Invalid worker HTTP configuration/)
+  const handle = createWorkerHttpHandler(options)
+  const room = { ...scope, roomId: 'general' }
+  const operation = { ...room, sessionId: 'private-session', requestId: 'room-request' }
+  for (const [action, input] of [['create', room], ['submit', { ...operation, text: 'mock prompt' }],
+    ['status', operation], ['cancel', operation],
+  ]) {
+    const response = await handle(request(action, input), transport)
+    assert.equal(response.status, 403, action)
+    assert.deepEqual(await response.json(), { error: 'worker-refused' })
+  }
+  const malformed = await handle(request('create', { ...room, roomId: '' }), transport)
+  assert.equal(malformed.status, 400)
+  assert.deepEqual(calls, [])
+})
