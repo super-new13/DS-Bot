@@ -10,6 +10,15 @@ const routes = new Map([
   ['/api/enterprise/private-chat/send', 'POST'],
   ['/api/enterprise/private-chat/cancel', 'POST'],
 ])
+const groupRoute = /^\/api\/enterprise\/group-chat\/[A-Za-z0-9_-]{1,128}\/(history|send)$/
+
+export function employeeRoute(path) {
+  const method = routes.get(path)
+  if (method) return { method, group: false }
+  const operation = groupRoute.exec(path)?.[1]
+  if (operation) return { method: operation === 'history' ? 'GET' : 'POST', group: true }
+}
+
 const requestFields = ['content-type', 'content-length', 'content-encoding', 'origin', 'sec-fetch-site', 'cookie']
 const hopByHop = ['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade']
 
@@ -61,7 +70,7 @@ async function writeResponse(res, output, signal) {
 
 async function handle(req, res, { origin, authority, handler, maxBodyBytes, bodyTimeoutMs }) {
   const path = req.url?.split('?', 1)[0]
-  const method = routes.get(path)
+  const method = employeeRoute(path)?.method
   if (req.headersDistinct.host?.length !== 1 || req.headers.host?.toLowerCase() !== authority || !method) return reject(res, 404)
   if (req.method !== method) return reject(res, 405, { Allow: method })
   const headers = new Headers()
