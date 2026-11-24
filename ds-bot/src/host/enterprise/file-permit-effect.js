@@ -21,5 +21,6 @@ export function createFilePermitGate({ client, nodeId, targetId, path } = {}) {
     if (signal?.aborted || !result || typeof result !== 'object' || Array.isArray(result)
         || Object.keys(result).length !== 2 || !Object.hasOwn(result, 'issued') || !Object.hasOwn(result, 'status')
         || result.issued !== true || result.status !== 'reserved') throw refused()
+    return scope
   }
 }

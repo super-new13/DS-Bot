@@ -9,9 +9,12 @@ const refused = () => Object.assign(new Error('Business file operation refused')
 const auditUnavailable = () => Object.assign(new Error('File authorization audit unavailable'), { code: 'file-audit-unavailable' })
 
 export function createWorkerFileDispatch({ root, workerOwned, readRules, isAuthorized, adjudicate,
-  maxBytes = 256 * 1024, timeoutMs, ttlMs, maxPending, now, writeAudit, permit } = {}) {
+  maxBytes = 256 * 1024, timeoutMs, ttlMs, maxPending, now, writeAudit, permit, onCompleted } = {}) {
   if (writeAudit !== undefined && typeof writeAudit !== 'function') throw new TypeError('Invalid file audit writer')
   const confirmPermit = permit === undefined ? undefined : createFilePermitGate(permit)
+  if (onCompleted !== undefined && (!confirmPermit || typeof onCompleted !== 'function')) {
+    throw new TypeError('File effect completion observer requires a permit gate')
+  }
   const authorization = createBusinessFileAuthorization({ readRules, isAuthorized, ttlMs, maxPending, now })
   const approve = createFileAdjudicator({ authorization, adjudicate, timeoutMs })
   const effects = createWorkerFileEffects({ root, workerOwned, authorization, maxBytes })
@@ -37,10 +40,12 @@ export function createWorkerFileDispatch({ root, workerOwned, readRules, isAutho
       } catch { throw auditUnavailable() }
     }) })
     if (!approval) throw refused()
-    if (confirmPermit) await confirmPermit(action, approval, { signal })
-    if (!writeAudit) return effects.execute(approval, action, bytes)
+    const reservedScope = confirmPermit ? await confirmPermit(action, approval, { signal }) : undefined
+    if (reservedScope && signal?.aborted) throw refused()
+    if (!writeAudit && !onCompleted) return effects.execute(approval, action, bytes)
 
     const report = async outcome => {
+      if (!writeAudit) return true
       try {
         return await writeAudit(Object.freeze({ type: 'file-effect', ...identity, ...decision, outcome })) !== false
       } catch { return false }
@@ -51,6 +56,14 @@ export function createWorkerFileDispatch({ root, workerOwned, readRules, isAutho
     } catch (error) {
       await report(error?.code === 'file-effect-unknown' ? 'unknown' : 'failed')
       throw error
+    }
+    // The effect is known to have succeeded even if evidence recording fails.
+    if (onCompleted && reservedScope) {
+      try {
+        if (await onCompleted(Object.freeze({ scope: reservedScope, status: 'completed' })) === false) {
+          result = { ...result, evidenceIncomplete: true }
+        }
+      } catch { result = { ...result, evidenceIncomplete: true } }
     }
     return await report('completed') ? result : { ...result, auditIncomplete: true }
   }
