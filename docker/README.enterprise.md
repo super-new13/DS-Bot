@@ -2,7 +2,8 @@
 
 This opt-in fixture starts the existing DSH image with DS Bot installed. The
 admin listener binds to container loopback, and Compose publishes zero ports.
-The fixture requires no Relay configuration and has no employee routes.
+The default fixture requires no Relay configuration. Enable the employee
+HTTPS pilot separately as described below.
 
 ## Validate locally
 
@@ -46,11 +47,9 @@ private network or SSH tunnel.
 The Web/API service derives employee identity from its server-side login
 session and authenticates to a dedicated plugin adapter. The adapter accepts
 only the approved business operations and rechecks employee and resource
-scope. Its listener, transport, and service authentication are pending
-validation against the public DSH plugin API. Network membership alone grants
+scope. The pilot uses mutual TLS to authenticate the dedicated worker connection. Network membership alone grants
 no authority. Do not forward DSH admin URLs, generic plugin channels, or
-employee-supplied identity headers. Supply deployment credentials out of band
-once the authentication mechanism exists.
+employee-supplied identity headers. Supply deployment credentials out of band.
 
 The existing image uses the full-access container preset. Keep employee access
 disabled until a runtime configuration enforces the approved tool and data
@@ -60,28 +59,105 @@ authorizations, conversations, audits and business files.
 
 ## Opt-in employee HTTPS pilot
 
-The employee service overrides the DSH Web entrypoint with the packaged CLI
-under /opt/dsh-template/profiles/web/node_modules/ds-bot/bin/. Build from a
-revision that includes ds-bot/bin/ds-bot-enterprise.mjs. The selected service
-publishes https://127.0.0.1:18443 and connects to an operator-configured worker
-over mTLS on a separate bridge network.
+Run from the repository root with a local Docker engine and a fresh Compose
+project. The pilot publishes `https://127.0.0.1:18443` on host loopback. Compose
+runs the packaged employee launcher as UID 1000 with a read-only root filesystem.
 
-Put config.json and the referenced TLS files in a dedicated host directory
-outside the Docker build context and readable by container UID 1000. Export DSBOT_ENTERPRISE_CONFIG_DIR with that
-absolute directory. The read-only mount is /run/dsbot-enterprise. Compose
-requires the source directory to exist. Use absolute container paths for TLS
-files. Set https.host to 0.0.0.0, https.port to 8443, and https.origin to
-https://127.0.0.1:18443 with a certificate for that origin. Set accountFile to
-/home/node/accounts.json on the dedicated employee volume. Enable
-initializeAccounts only for first-time provisioning.
+Put `config.json` and its TLS files in a dedicated host directory outside the
+build context. The directory must already exist and be readable by container
+UID 1000. Restrict private-key access to the operator and that UID. Compose
+mounts the directory read-only at `/run/dsbot-enterprise`. Use absolute container
+paths in the configuration. This example starts the page and account service
+with chat disabled.
 
-    docker compose --env-file /dev/null -f compose.enterprise.yml --profile employee-pilot config --quiet
-    node --test docker/test-enterprise.mjs
+```json
+{
+  "accountFile": "/home/node/accounts.json",
+  "initializeAccounts": true,
+  "https": {
+    "origin": "https://127.0.0.1:18443",
+    "host": "0.0.0.0",
+    "port": 8443,
+    "certFile": "/run/dsbot-enterprise/employee.pem",
+    "keyFile": "/run/dsbot-enterprise/employee.key"
+  },
+  "workers": [],
+  "roster": {
+    "people": { "pilot-alice": { "id": "pilot-alice", "name": "Alice", "botIds": [] } },
+    "bots": {},
+    "rooms": {}
+  },
+  "limits": { "maxActive": 1, "maxPerBot": 1, "maxPerNode": 1, "maxPending": 2 }
+}
+```
 
-With a local engine, disposable operator files and a fresh project, select
-only employee-pilot to avoid starting the DSH Web fixture.
+Use a server certificate with an IP subject alternative name for `127.0.0.1`
+and a CA trusted by the pilot browser. Chat requires a separate mock mTLS
+worker reachable from `employee-edge`. Its certificate must match its HTTPS
+hostname and its grants must authorize the controller certificate for the test
+employee and Bot. Add a `workers` entry with `nodeId`, canonical HTTPS `origin`
+and absolute `caFile`, `certFile` and `keyFile` paths for the worker CA and
+controller identity. Add a matching Bot under `roster.bots` with `id` and `nodeId`
+and list its ID in the employee's `botIds`. Keep `rooms` empty. Use disposable
+data and a mock model. Select only `employee-pilot` when starting the service.
 
-    docker compose --env-file /dev/null -f compose.enterprise.yml -p ds-bot-employee-smoke up --build employee-pilot
+```sh
+export DSBOT_ENTERPRISE_CONFIG_DIR=/absolute/path/to/disposable-pilot-config
+project="ds-bot-employee-smoke-$(date +%s)-$$"
+pilot_compose() {
+  docker compose --env-file /dev/null -f compose.enterprise.yml \
+    --profile employee-pilot -p "$project" "$@"
+}
+pilot_compose config --quiet
+pilot_compose up --build -d --no-deps employee-pilot
+```
 
-Supply a reachable mock mTLS worker separately when testing chat. Use a fresh
-project name for each smoke test and remove its disposable volumes afterward.
+After the page responds over HTTPS, set `initializeAccounts` to `false` or
+remove the key. Future starts will require the existing account store. Compose
+mounts the project-scoped `enterprise-employee-data` volume at `/home/node`.
+Keep that volume and project name across starts. The DSH fixture uses separate
+volumes.
+
+### Issue an invitation or revoke an account
+
+Stop the employee service and every other writer before starting the offline
+admin command. Keep them stopped until it finishes. `--service-stopped` is the
+operator's confirmation of exclusive access. The store has no cross-process
+lock. Use the same project, image, config and account volume as the pilot.
+
+```sh
+account_volume="$project"_enterprise-employee-data
+pilot_admin() {
+  pilot_compose stop employee-pilot &&
+    docker volume inspect "$account_volume" >/dev/null &&
+    docker run --rm --pull=never --network=none --log-driver=none \
+      --read-only --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges \
+      --mount "type=bind,source=$DSBOT_ENTERPRISE_CONFIG_DIR,target=/run/dsbot-enterprise,readonly" \
+      --mount "type=volume,source=$account_volume,target=/home/node" \
+      --entrypoint node ds-bot-enterprise-dsh:local \
+      /opt/dsh-template/profiles/web/node_modules/ds-bot/bin/ds-bot-enterprise-admin.mjs \
+      --config /run/dsbot-enterprise/config.json --service-stopped "$@"
+}
+```
+
+Capture invitation output privately. The helper disables container logging,
+and the command below sends stdout directly to an operator-only temporary file.
+Keep shell tracing off.
+
+```sh
+set +x
+umask 077
+invite_file=$(mktemp) && pilot_admin invite pilot-alice >"$invite_file"
+```
+
+On success, send the one-time `token`, its expiration (`expiresAt` in Unix
+milliseconds), the employee ID and the pilot URL through your approved private
+channel. Keep the code out of terminal transcripts, shared logs and test reports.
+Delete the local capture after handoff. The recipient selects **Use an
+invitation**, sets a password and signs in with the employee ID.
+
+To revoke instead, run `pilot_admin revoke pilot-alice`. Revocation clears
+that account's invitation, credentials and login sessions. Start the same
+service after the offline command ends with `pilot_compose up -d --no-deps
+employee-pilot`. Use `pilot_compose down --volumes` only when discarding a
+disposable project.
