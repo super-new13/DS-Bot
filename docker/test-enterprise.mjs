@@ -79,7 +79,7 @@ test('explicit pilot publishes only loopback HTTPS with isolated data and read-o
     ['bind', fixture, '/run/dsbot-enterprise'], ['volume', 'enterprise-employee-data', '/home/node'],
   ])
   assert.equal(pilot.volumes[0].read_only, true)
-  assert.equal(pilot.volumes[0].bind.create_host_path, false)
+  assert.equal(pilot.volumes[0].bind?.create_host_path ?? false, false)
   assert.equal(volumes['enterprise-employee-data'].name, project + '_enterprise-employee-data')
   assert.equal(volumes['enterprise-employee-data'].external, undefined)
 })
@@ -119,7 +119,7 @@ test('policy and worker profiles are independent and have no published or shared
       ['bind', source, '/app/config'], ['volume', volume, '/home/node'],
     ])
     assert.equal(model.volumes[0].read_only, true)
-    assert.equal(model.volumes[0].bind.create_host_path, false)
+    assert.equal(model.volumes[0].bind?.create_host_path ?? false, false)
     assert.equal(volumes[volume].name, project + '_' + volume)
     assert.equal(volumes[volume].external, undefined)
   }
