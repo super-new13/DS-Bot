@@ -230,5 +230,17 @@ export function createWorkerSessionAdapter(ctx, { authorize, provider, model, no
     if (failed) throw failed.reason
   }
 
-  return { create, submit, cancel, close }
+  function currentTurn(agent) {
+    const entry = sessions.get(agent?.session?.id)
+    const run = entry?.active
+    if (!run?.admitted || entry.agent !== agent) return undefined
+    const step = run.step
+    const isCurrent = () => entry.active === run && run.step === step && run.status === undefined
+      && !run.cancelRequested && agent.status === 'running' && emptyInbox(agent) && canContinue(entry, run)
+    if (!isCurrent()) return undefined
+    const { personId, botId, roomId = null, sessionId } = run.scope
+    return Object.freeze({ personId, botId, roomId, sessionId, requestId: run.requestId, isCurrent })
+  }
+
+  return { create, submit, cancel, close, currentTurn }
 }

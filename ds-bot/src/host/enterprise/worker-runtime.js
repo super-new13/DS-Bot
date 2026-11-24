@@ -5,6 +5,7 @@ import { openWorkerReceiptStore } from './receipt-store.js'
 import { createWorkerHttpHandler } from './worker-http.js'
 import { openWorkerReceipts } from './worker-receipts.js'
 import { createWorkerSessionAdapter } from './worker-session.js'
+import { installWorkerFileTools } from './worker-file-tools.js'
 import { startLocalWorkerTls } from './worker-tls.js'
 
 const claimedContexts = new WeakSet()
@@ -14,7 +15,7 @@ const validId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.t
 // Transfer ownership of a dedicated, isolated DSH Context to this runtime.
 // Grants are live, synchronous checks against trusted worker configuration.
 export async function startLocalWorkerRuntime({ ctx, nodeId, provider, model, receiptPath, mappingPath, sessionRoot, initialize = false,
-  tls, host, port, origin, authorizePeer, authorizeSession, allowRooms = false, limits = {} }) {
+  tls, host, port, origin, authorizePeer, authorizeSession, allowRooms = false, fileTools, limits = {} }) {
   if (!ctx?.agents || !ctx.fiber || !validId(nodeId) || !provider?.trim() || !model?.trim()
       || typeof receiptPath !== 'string' || !isAbsolute(receiptPath)
       || typeof authorizePeer !== 'function' || typeof authorizeSession !== 'function' || typeof allowRooms !== 'boolean'
@@ -61,11 +62,14 @@ export async function startLocalWorkerRuntime({ ctx, nodeId, provider, model, re
       void operation.then(untrack, untrack)
       return operation
     } })
-    // This runtime serves model turns only. The dedicated Context owns this guard.
-    ctx.on('tools/execute', () => { throw new Error('Tools are disabled on this worker') }, { prepend: true })
     worker = createWorkerSessionAdapter(ctx, { provider, model, nodeId, mapping, sessionRoot,
       authorize: (scope, requestId) => !closed && authorizeSession(Object.freeze({ ...scope, nodeId }), requestId) === true,
     })
+    if (fileTools === undefined) {
+      ctx.on('tools/execute', () => { throw new Error('Tools are disabled on this worker') }, { prepend: true })
+    } else {
+      installWorkerFileTools(ctx, worker.currentTurn, fileTools)
+    }
     let handle
     const { maxBodyBytes, maxActive, timeoutMs, maxConnections } = limits
     listener = await startLocalWorkerTls({ ...tls, host, port, origin, maxBodyBytes, timeoutMs, maxConnections,
