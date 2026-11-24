@@ -16,11 +16,15 @@ function scopeOf(input) {
     if (!Object.hasOwn(input ?? {}, field) || !validId(input[field])) throw refused()
     scope[field] = input[field]
   }
+  if (Object.hasOwn(input, 'roomId')) {
+    if (!validId(input.roomId)) throw refused()
+    scope.roomId = input.roomId
+  }
   return scope
 }
 
 function sameScope(left, right) {
-  return scopeFields.every(field => Object.hasOwn(left, field) && left[field] === right[field])
+  return left.roomId === right.roomId && scopeFields.every(field => Object.hasOwn(left, field) && left[field] === right[field])
 }
 
 function checkState(state) {
@@ -33,6 +37,7 @@ function storedReceipt(state, key) {
   const record = state.receipts[key]
   if (!isRecord(record) || !isRecord(record.scope)
       || !scopeFields.every(field => Object.hasOwn(record.scope, field) && validId(record.scope[field]))
+      || (Object.hasOwn(record.scope, 'roomId') && !validId(record.scope.roomId))
       || !validDigest(record.inputDigest) || !validId(record.generation) || !validTime(record.admittedAt)
       || (record.status === 'admitted' ? Object.hasOwn(record, 'finishedAt')
         : !terminal.has(record.status) || !validTime(record.finishedAt) || record.finishedAt < record.admittedAt)) {

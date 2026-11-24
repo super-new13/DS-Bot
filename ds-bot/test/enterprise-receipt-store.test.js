@@ -70,3 +70,20 @@ test('atomically replaces the file and leaves prior bytes intact on transaction 
   await storage.transact(draft => { draft.generation = 'after-failure' })
   assert.equal((await storage.read()).generation, 'after-failure')
 })
+
+
+test('room receipt ownership survives restart and separates rooms, actors and private chat', async t => {
+  const { path } = await fixture(t)
+  const room = { ...scope, roomId: 'room-a' }
+  const first = await openWorkerReceipts(await openWorkerReceiptStore(path, { initialize: true }))
+  await first.admit(room, 'room-request', digest)
+  await first.finish(room, 'room-request', 'completed')
+  const restarted = await openWorkerReceipts(await openWorkerReceiptStore(path))
+  assert.equal((await restarted.lookup(room, 'room-request')).status, 'completed')
+  for (const foreign of [scope, { ...room, roomId: 'room-b' }, { ...room, personId: 'person-b' }]) {
+    assert.equal(await restarted.lookup(foreign, 'room-request'), undefined)
+    await assert.rejects(restarted.admit(foreign, 'room-request', digest), { code: 'not-authorized' })
+    await assert.rejects(restarted.finish(foreign, 'room-request', 'completed'), { code: 'not-authorized' })
+  }
+  await assert.rejects(restarted.admit({ ...scope, roomId: undefined }, 'invalid', digest), { code: 'not-authorized' })
+})

@@ -26,9 +26,10 @@ function decode(text) {
     if (state.generation === null || !key.startsWith('request:') || !id(key.slice('request:'.length))) throw invalid()
     const common = ['scope', 'inputDigest', 'generation', 'status', 'admittedAt']
     const finished = terminal.has(receipt?.status)
+    const scopedFields = Object.hasOwn(receipt?.scope ?? {}, 'roomId') ? [...scopeFields, 'roomId'] : scopeFields
     if (!fields(receipt, ...common, ...(finished ? ['finishedAt'] : []))
         || !(finished || receipt.status === 'admitted')
-        || !fields(receipt.scope, ...scopeFields) || !scopeFields.every(key => id(receipt.scope[key]))
+        || !fields(receipt.scope, ...scopedFields) || !scopedFields.every(key => id(receipt.scope[key]))
         || typeof receipt.inputDigest !== 'string' || !/^[0-9a-f]{64}$/.test(receipt.inputDigest)
         || !id(receipt.generation) || !time(receipt.admittedAt)
         || (finished && (!time(receipt.finishedAt) || receipt.finishedAt < receipt.admittedAt))) throw invalid()
