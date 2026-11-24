@@ -226,3 +226,43 @@ fixed diagnostics. Operator modules are responsible for keeping their own
 output private. Set `initialize: true` only to provision fresh stores and
 assign one writer per store. These commands are invoked independently of the
 employee Compose pilot.
+
+### Run the node launchers through Compose
+
+The file-policy and worker profiles start separate containers from a Node 24
+image that installs the packed DS Bot package and pinned DSH 0.2.2-rc.1. Each
+role starts as UID 1000 and has its own project-scoped volume at /home/node.
+Provision state paths under that directory and use a separate private
+subdirectory for the worker's business files if file tools are enabled. The
+image skips npm lifecycle scripts. Check any additional native dependencies of
+an operator-provided model adapter before selecting it for this image.
+
+Set DSBOT_FILE_POLICY_CONFIG_DIR and DSBOT_WORKER_CONFIG_DIR to two separate
+operator-controlled directories outside the build context. Include policy.mjs
+and worker.mjs in their respective directories. Each mounts read-only at
+/app/config. Include only the TLS files each role uses, readable by UID 1000.
+Provision distinct server certificates and private keys for the listeners and
+distinct client identities for ordinary worker requests and evidence delivery.
+Keep producer and ordinary worker enrollments disjoint. Never mount policy
+private keys or the policy state volume into the worker. The operator modules
+supply the absolute TLS and state paths plus the callbacks described above.
+
+The roles share the internal file-operations network. For communication within
+a Compose project, configure listeners to bind at 0.0.0.0 and set the canonical
+HTTPS origins to the relevant service DNS names and dedicated ports. Issue
+certificates with matching DNS names, including the separate evidence listener
+origin if configured. Use an injected mock model for isolated startup checks.
+Model egress, employee-pilot connectivity and remote workers require an
+operator-provisioned private route and matching TLS configuration. Keep the
+route limited to the intended service peers. The base profiles publish zero
+host ports and keep DSH on its own internal network.
+
+Render the configuration from the repository root before any startup:
+
+    docker compose --env-file /dev/null -f compose.enterprise.yml --profile file-policy --profile worker config --quiet
+    node --test docker/test-enterprise.mjs
+
+To start both roles in a disposable project with a local engine and provisioned
+fixture directories, explicitly select the two services:
+
+    docker compose --env-file /dev/null -f compose.enterprise.yml -p dsbot-node-smoke up --build file-policy worker

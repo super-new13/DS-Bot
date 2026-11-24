@@ -6,13 +6,15 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 
-function config(project, fixture) {
+function config(project, fixture, profiles = [], roleDirs = {}) {
   const args = ['compose', '--env-file', '/dev/null', '-f', 'compose.enterprise.yml']
   if (project) args.push('-p', project)
   if (fixture) args.push('--profile', 'employee-pilot')
+  for (const profile of profiles) args.push('--profile', profile)
   return JSON.parse(execFileSync('docker', [...args, 'config', '--format', 'json'], {
     cwd: fileURLToPath(new URL('..', import.meta.url)),
-    env: { ...process.env, COMPOSE_PROJECT_NAME: '', COMPOSE_PROFILES: '', DSBOT_ENTERPRISE_CONFIG_DIR: fixture ?? '', DATA_DIR: './docker/data', WORKSPACE_DIR: './docker/workspace' },
+    env: { ...process.env, COMPOSE_PROJECT_NAME: '', COMPOSE_PROFILES: '', DSBOT_ENTERPRISE_CONFIG_DIR: fixture ?? '',
+      DSBOT_FILE_POLICY_CONFIG_DIR: roleDirs.policy ?? '', DSBOT_WORKER_CONFIG_DIR: roleDirs.worker ?? '', DATA_DIR: './docker/data', WORKSPACE_DIR: './docker/workspace' },
     encoding: 'utf8',
   }))
 }
@@ -80,4 +82,45 @@ test('explicit pilot publishes only loopback HTTPS with isolated data and read-o
   assert.equal(pilot.volumes[0].bind.create_host_path, false)
   assert.equal(volumes['enterprise-employee-data'].name, project + '_enterprise-employee-data')
   assert.equal(volumes['enterprise-employee-data'].external, undefined)
+})
+
+test('policy and worker profiles are independent and have no published or shared management route', t => {
+  const policy = mkdtempSync(join(tmpdir(), 'dsbot-policy-'))
+  t.after(() => rmSync(policy, { recursive: true, force: true }))
+  const worker = mkdtempSync(join(tmpdir(), 'dsbot-worker-'))
+  t.after(() => rmSync(worker, { recursive: true, force: true }))
+  const project = 'dsbot-private-roles'
+  const roleDirs = { policy, worker }
+  const profiles = ['file-policy', 'worker']
+  for (const profile of profiles) {
+    const { services } = config(project, undefined, [profile], roleDirs)
+    assert.deepEqual(Object.keys(services).sort(), ['dsh', profile].sort())
+  }
+  const { services, networks, secrets, volumes } = config(project, undefined, profiles, roleDirs)
+  assert.equal(networks['file-operations'].internal, true)
+  assert.deepEqual(Object.keys(services.dsh.networks), ['enterprise-backend'])
+  assert.deepEqual(services.dsh.ports ?? [], [])
+  assert.deepEqual(secrets ?? {}, {})
+  for (const [service, role, source, volume] of [
+    ['file-policy', 'policy', policy, 'enterprise-policy-data'], ['worker', 'worker', worker, 'enterprise-worker-data'],
+  ]) {
+    const model = services[service]
+    assert.deepEqual(model.entrypoint, ['node', '/app/node_modules/ds-bot/bin/ds-bot-enterprise-node.mjs', role,
+      '--config', '/app/config/' + role + '.mjs'])
+    assert.match(model.build.dockerfile_inline, /@deepseek-ai\/dsh@0\.2\.2-rc\.1/)
+    assert.equal(model.user, '1000:1000')
+    assert.equal(model.read_only, true)
+    assert.deepEqual(Object.keys(model.networks), ['file-operations'])
+    assert.deepEqual(model.ports ?? [], [])
+    assert.equal(model.network_mode, undefined)
+    assert.equal(model.env_file, undefined)
+    assert.equal(model.depends_on, undefined)
+    assert.deepEqual(model.volumes.map(({ type, source: from, target }) => [type, from, target]), [
+      ['bind', source, '/app/config'], ['volume', volume, '/home/node'],
+    ])
+    assert.equal(model.volumes[0].read_only, true)
+    assert.equal(model.volumes[0].bind.create_host_path, false)
+    assert.equal(volumes[volume].name, project + '_' + volume)
+    assert.equal(volumes[volume].external, undefined)
+  }
 })

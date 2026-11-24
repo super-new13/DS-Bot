@@ -1,5 +1,30 @@
 name: ds-bot-enterprise
 
+x-enterprise-node: &enterprise-node
+  image: ds-bot-enterprise-node:local
+  pull_policy: never
+  build:
+    context: .
+    dockerfile_inline: |
+      FROM node:24-bookworm-slim AS build
+      WORKDIR /app
+      COPY ds-bot/ /src/ds-bot/
+      RUN npm pack /src/ds-bot --pack-destination /tmp --ignore-scripts \
+          && npm install --ignore-scripts --no-audit --no-fund --no-package-lock \
+             @deepseek-ai/dsh@0.2.2-rc.1 \
+          && mkdir -p /app/node_modules/ds-bot \
+          && tar -xzf /tmp/ds-bot-*.tgz --strip-components=1 -C /app/node_modules/ds-bot \
+          && rm /tmp/ds-bot-*.tgz \
+          && test -f /app/node_modules/ds-bot/bin/ds-bot-enterprise-node.mjs
+      FROM node:24-bookworm-slim
+      COPY --from=build /app/node_modules /app/node_modules
+  user: "1000:1000"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  working_dir: /home/node
+  stop_grace_period: 15s
+
 services:
   dsh:
     image: ds-bot-enterprise-dsh:local
@@ -52,7 +77,39 @@ services:
       - enterprise-employee-data:/home/node
     stop_grace_period: 15s
 
+  file-policy:
+    <<: *enterprise-node
+    profiles: [file-policy]
+    entrypoint: ["node", "/app/node_modules/ds-bot/bin/ds-bot-enterprise-node.mjs", "policy", "--config", "/app/config/policy.mjs"]
+    networks:
+      - file-operations
+    volumes:
+      - type: bind
+        source: ${DSBOT_FILE_POLICY_CONFIG_DIR:-/nonexistent/dsbot-file-policy}
+        target: /app/config
+        read_only: true
+        bind:
+          create_host_path: false
+      - enterprise-policy-data:/home/node
+
+  worker:
+    <<: *enterprise-node
+    profiles: [worker]
+    entrypoint: ["node", "/app/node_modules/ds-bot/bin/ds-bot-enterprise-node.mjs", "worker", "--config", "/app/config/worker.mjs"]
+    networks:
+      - file-operations
+    volumes:
+      - type: bind
+        source: ${DSBOT_WORKER_CONFIG_DIR:-/nonexistent/dsbot-worker}
+        target: /app/config
+        read_only: true
+        bind:
+          create_host_path: false
+      - enterprise-worker-data:/home/node
+
 networks:
+  file-operations:
+    internal: true
   employee-edge:
   enterprise-backend:
     internal: true
@@ -61,3 +118,5 @@ volumes:
   enterprise-dsh-data:
   enterprise-dsh-workspace:
   enterprise-employee-data:
+  enterprise-policy-data:
+  enterprise-worker-data:
