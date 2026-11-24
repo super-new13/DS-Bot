@@ -3,7 +3,7 @@ import {
   closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, openSync, readSync,
   realpathSync, renameSync, unlinkSync, writeFileSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 
 const flags = { bigint: true }
 const tempPrefix = '.dsbot-effect-'
