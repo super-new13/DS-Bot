@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { X509Certificate } from 'node:crypto'
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -31,7 +31,21 @@ function makeTls(dir) {
 
 const name = 'worker_replace_file'
 
-for (const mode of ['disabled', 'allowed', 'foreign actor', 'revoked', 'wrong call', 'foreign tool', 'nested']) {
+const cases = [
+  { mode: 'disabled' }, { mode: 'allowed', ok: true }, { mode: 'foreign actor' }, { mode: 'revoked', revoke: true },
+  { mode: 'wrong call' }, { mode: 'foreign tool' }, { mode: 'nested' },
+  { mode: 'read', operation: 'read', grant: 'read', ok: true },
+  { mode: 'bounded read', operation: 'read', grant: 'read', maxBytes: 3 },
+  { mode: 'invalid UTF-8', operation: 'read', grant: 'read', initial: Buffer.from([0xff]), adjudicated: true },
+  { mode: 'write grant cannot read', operation: 'read' },
+  { mode: 'modify-only default refuses read', operation: 'read', operations: ['modify'], grant: 'read' },
+  { mode: 'read grant cannot create', operation: 'create', grant: 'read', missing: true },
+  { mode: 'create', operation: 'create', missing: true, ok: true },
+  { mode: 'create conflicts', operation: 'create', adjudicated: true },
+  { mode: 'create revoked', operation: 'create', missing: true, revoke: true },
+]
+for (const { mode, operation = 'modify', operations = operation === 'modify' ? undefined : [operation], grant = 'write',
+  ok = false, missing = false, revoke = false, initial = 'initial', maxBytes, adjudicated = false } of cases) {
   test('guarded worker runtime file tool ' + mode, { timeout: 8000, skip: process.platform === 'win32' }, async t => {
     const root = mkdtempSync(join(realpathSync(tmpdir()), 'worker-file-runtime-'))
     const ctx = new Context()
@@ -43,7 +57,7 @@ for (const mode of ['disabled', 'allowed', 'foreign actor', 'revoked', 'wrong ca
       finally { rmSync(root, { recursive: true, force: true }) }
     })
     const path = join(root, 'note')
-    writeFileSync(path, 'initial')
+    if (!missing) writeFileSync(path, initial)
     const tls = makeTls(root)
     await mountAgentLoopTestDependencies(ctx, { tools: { mode: 'native' } })
     let step = 0
@@ -68,8 +82,9 @@ for (const mode of ['disabled', 'allowed', 'foreign actor', 'revoked', 'wrong ca
       }
       async *stream() {
         if (step++ > 0) { yield { type: 'finish', reason: { kind: 'stop' } }; return }
-        const tool = mode === 'disabled' || mode === 'foreign tool' ? 'foreign_tool' : name
-        const args = tool === name ? { content: 'approved' } : {}
+        const fileTool = { modify: name, read: 'worker_read_file', create: 'worker_create_file' }[operation]
+        const tool = mode === 'disabled' || mode === 'foreign tool' ? 'foreign_tool' : fileTool
+        const args = tool === fileTool && operation !== 'read' ? { content: 'approved' } : {}
         yield { type: 'block-start', index: 0, blockType: 'tool-call', id: 'fixture-call', name: tool }
         yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'fixture-call', name: tool, arguments: JSON.stringify(args) } }
         yield { type: 'finish', reason: { kind: 'tool-use' } }
@@ -85,14 +100,14 @@ for (const mode of ['disabled', 'allowed', 'foreign actor', 'revoked', 'wrong ca
     runtime = await startLocalWorkerRuntime({ ctx, nodeId: scope.nodeId, provider: 'mock', model: 'mock', tls: tls.server,
       receiptPath: join(root, 'receipts.json'), initialize: true,
       authorizePeer: peer => peer === fingerprint, authorizeSession: () => live,
-      ...(mode !== 'disabled' && { fileTools: { root, path, workerOwned: true,
+      ...(mode !== 'disabled' && { fileTools: { root, path, workerOwned: true, operations, maxBytes,
         readRules: () => ({ version: 'v1', rules: [{ id: 'note', personId: 'alice', botId: 'helper', roomId: null,
-          directory: root, grant: 'write', effect: 'allow', purpose: 'Update fixture note',
+          directory: root, grant, effect: 'allow', purpose: 'Update fixture note',
         }] }),
         isAuthorized: action => action.personId === 'alice' && action.requestId === 'fixture-request',
         async adjudicate({ rule }) {
           judgments++
-          if (mode === 'revoked') { judging.resolve(); await decision.promise }
+          if (revoke) { judging.resolve(); await decision.promise }
           return { verdict: 'allow', ruleId: rule.id, ruleVersion: rule.version, reason: 'Fixture allows replacement' }
         },
       } }),
@@ -101,18 +116,22 @@ for (const mode of ['disabled', 'allowed', 'foreign actor', 'revoked', 'wrong ca
     const client = createWorkerClient({ origin, nodeId: scope.nodeId, transport: createWorkerTlsTransport({ ...tls.controller, origin }) })
     const { sessionId } = await client.create(scope)
     const submission = client.submit({ ...scope, sessionId }, 'fixture-request', 'update fixture')
-    if (mode === 'revoked') {
+    if (revoke) {
       await judging.promise
-      assert.equal(readFileSync(path, 'utf8'), 'initial')
+      if (missing) assert.equal(existsSync(path), false)
+      else assert.deepEqual(readFileSync(path), Buffer.from(initial))
       live = false
       decision.resolve()
     }
     await submission
-    assert.equal(readFileSync(path, 'utf8'), mode === 'allowed' ? 'approved' : 'initial')
-    assert.equal(judgments, ['allowed', 'revoked'].includes(mode) ? 1 : 0)
+    if (missing && !ok) assert.equal(existsSync(path), false)
+    else assert.deepEqual(readFileSync(path), Buffer.from(ok && operation !== 'read' ? 'approved' : initial))
+    assert.equal(judgments, ok || revoke || adjudicated ? 1 : 0)
     assert.equal(foreignInvoked, false)
     const results = ctx.agents.get(sessionId).session.snapshotEvents().filter(event => event.type === 'tool/result')
     assert.equal(results.length, 1)
-    assert.equal(results[0].data.message.isError === true, mode !== 'allowed')
+    const result = results[0].data.message
+    assert.equal(result.isError === true, !ok)
+    if (ok && operation === 'read') assert.deepEqual(result.content, [{ type: 'text', text: initial }])
   })
 }

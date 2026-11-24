@@ -2,6 +2,7 @@ import { constants } from 'node:fs'
 import { open } from 'node:fs/promises'
 import { isAbsolute, resolve, sep } from 'node:path'
 import { apply as applyWorker } from './worker-plugin.js'
+import { snapshotFileOperations } from './worker-file-tools.js'
 
 const actions = new Set(['create', 'submit', 'cancel', 'status'])
 const id = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value)
@@ -34,7 +35,7 @@ function snapshotFileTools(options) {
   if (workerOwned !== true || !canonical(root) || root === sep || !canonical(path) || !path.startsWith(root + sep)
       || ![readRules, isAuthorized, adjudicate].every(callback => typeof callback === 'function')
       || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 1024 * 1024) throw invalid()
-  return Object.freeze({ root, path, workerOwned, readRules, isAuthorized, adjudicate, maxBytes })
+  return Object.freeze({ root, path, workerOwned, readRules, isAuthorized, adjudicate, maxBytes, operations: snapshotFileOperations(options.operations) })
 }
 
 // The trusted DSH entry passes its administrator settings and model adapter
