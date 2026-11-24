@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; form-action 'none'; base-uri 'none'">
+  <title>DS Bot · Employee</title>
+  <link rel="stylesheet" href="./page.css">
+  <script type="module" src="./page.js"></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>DS Bot · Employee</h1>
+        <p id="employee" hidden></p>
+      </div>
+      <button id="logout" type="button" hidden>Sign out</button>
+    </header>
+    <p id="session-status" role="status">Checking your session…</p>
+    <button id="retry-session" type="button" hidden>Check session again</button>
+    <section class="card" id="auth" aria-labelledby="auth-title" hidden>
+      <h2 id="auth-title">Sign in</h2>
+      <form id="login">
+        <label>Employee ID <input id="person-id" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="128" required></label>
+        <label>Password <input id="login-password" type="password" autocomplete="current-password" required></label>
+        <button class="primary">Sign in</button>
+      </form>
+      <form id="invite" hidden>
+        <label>Invitation code <input id="invite-token" type="password" autocomplete="off" required></label>
+        <label>New password <input id="invite-password" type="password" autocomplete="new-password" required></label>
+        <button class="primary">Activate account</button>
+      </form>
+      <p id="auth-status" role="status" class="feedback"></p>
+      <button id="switch-auth" type="button">Use an invitation</button>
+    </section>
+    <section class="card" id="chat" aria-labelledby="chat-title" hidden>
+      <h2 id="chat-title" tabindex="-1">Private chat</h2>
+      <p id="empty">Enter the Bot ID provided by your administrator to start a chat.</p>
+      <div id="messages" aria-label="Messages"></div>
+      <form id="compose">
+        <label>Bot ID <input id="bot-id" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="128" required></label>
+        <label>Message <textarea id="message" rows="3" required></textarea></label>
+        <p id="chat-status" role="status" class="feedback"></p>
+        <div class="actions">
+          <button class="primary" id="send">Send</button>
+          <button id="stop" type="button" hidden>Stop</button>
+        </div>
+      </form>
+    </section>
+  </main>
+</body>
+</html>
