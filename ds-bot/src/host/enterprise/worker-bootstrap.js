@@ -30,12 +30,13 @@ async function loadPem(path) {
 // File callbacks are accepted only as a programmatic dependency of the trusted entry.
 function snapshotFileTools(options) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) throw invalid()
-  const { root, path, workerOwned, readRules, isAuthorized, adjudicate, maxBytes = 256 * 1024 } = options
+  const { root, path, workerOwned, readRules, isAuthorized, adjudicate, writeAudit, maxBytes = 256 * 1024 } = options
   const canonical = value => absolute(value) && !value.includes(String.fromCharCode(0)) && resolve(value) === value
   if (workerOwned !== true || !canonical(root) || root === sep || !canonical(path) || !path.startsWith(root + sep)
       || ![readRules, isAuthorized, adjudicate].every(callback => typeof callback === 'function')
+      || (writeAudit !== undefined && typeof writeAudit !== 'function')
       || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 1024 * 1024) throw invalid()
-  return Object.freeze({ root, path, workerOwned, readRules, isAuthorized, adjudicate, maxBytes, operations: snapshotFileOperations(options.operations) })
+  return Object.freeze({ root, path, workerOwned, readRules, isAuthorized, adjudicate, writeAudit, maxBytes, operations: snapshotFileOperations(options.operations) })
 }
 
 // The trusted DSH entry passes its administrator settings and model adapter

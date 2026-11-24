@@ -21,11 +21,14 @@ export function createFileAdjudicator({ authorization, adjudicate, timeoutMs = 5
     throw new TypeError('Invalid file adjudicator settings')
   }
 
-  return async function approve(input, { context } = {}) {
-    if (context !== undefined && (typeof context !== 'string' || context.length > 2048)) return undefined
+  return async function approve(input, { context, onDecision } = {}) {
+    const denied = async () => {
+      await onDecision?.({ verdict: 'denied', ruleId: null, ruleVersion: null })
+    }
+    if (context !== undefined && (typeof context !== 'string' || context.length > 2048)) return denied()
     const action = Object.freeze({ ...input })
     const decision = authorization.prepare(action)
-    if (!decision) return undefined
+    if (!decision) return denied()
     const question = Object.freeze({
       rule: Object.freeze({ id: decision.ruleId, version: decision.ruleVersion, purpose: decision.purpose }),
       action: Object.freeze({ operation: action.operation, path: action.path }),
@@ -49,6 +52,8 @@ export function createFileAdjudicator({ authorization, adjudicate, timeoutMs = 5
     } finally {
       clearTimeout(timer)
     }
-    return authorization.decide(decision, allowed ? 'allow' : 'deny') ? decision : undefined
+    const approved = authorization.decide(decision, allowed ? 'allow' : 'deny')
+    await onDecision?.({ verdict: approved ? 'allowed' : 'denied', ruleId: decision.ruleId, ruleVersion: decision.ruleVersion })
+    return approved ? decision : undefined
   }
 }
