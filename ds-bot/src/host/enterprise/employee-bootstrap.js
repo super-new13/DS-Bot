@@ -6,6 +6,7 @@ import { createSecureContext } from 'node:tls'
 import { startEmployeeRuntime } from './employee-runtime.js'
 import { createEmployeeGroupRuntime } from './group-runtime.js'
 import { openEmployeeGroupStore } from './group-store.js'
+import { createRoomExecutor } from './room-executor.js'
 import { createRemoteWorkerAdapter } from './remote-adapter.js'
 import { createEnterpriseRuntimeRoster } from './runtime-roster.js'
 import { createWorkerClient } from './worker-client.js'
@@ -40,7 +41,7 @@ function check(config) {
   if (!exact(roster, ['people', 'bots', 'rooms']) || !roster.rooms || typeof roster.rooms !== 'object'
       || Array.isArray(roster.rooms)) throw invalid('rooms table')
   if (config.groups === undefined && Object.keys(roster.rooms).length) throw invalid('rooms require group storage')
-  if (config.groups !== undefined && (!exact(config.groups, ['directory'], ['limits']) || !absolute(config.groups.directory)
+  if (config.groups !== undefined && (!exact(config.groups, ['directory'], ['limits', 'roomBots']) || !absolute(config.groups.directory)
       || (config.groups.limits !== undefined && (!exact(config.groups.limits, groupLimits)
         || !groupLimits.every(key => Number.isSafeInteger(config.groups.limits[key]) && config.groups.limits[key] > 0))))) {
     throw invalid('group storage or limits')
@@ -82,8 +83,10 @@ export async function startEmployeeDeployment(configFile, { executeRoom } = {}) 
   try { config = JSON.parse(await readFile(configFile, 'utf8')) } catch { throw invalid('could not read JSON file') }
   check(config)
   const { accountFile, initializeAccounts, https, roster, limits, groups } = config
-  if (groups !== undefined && typeof executeRoom !== 'function') throw invalid('trusted room executor required')
+  if (groups !== undefined && groups.roomBots === undefined && typeof executeRoom !== 'function') throw invalid('trusted room executor required')
+  if (groups?.roomBots !== undefined && executeRoom !== undefined) throw invalid('ambiguous room executor')
   const workers = new Map()
+  const clients = new Map()
   const readConfig = () => roster
   const snapshot = createEnterpriseRuntimeRoster({ readConfig, workers }).readRoster()
   const nodes = new Set(config.workers.map(worker => worker.nodeId))
@@ -95,15 +98,17 @@ export async function startEmployeeDeployment(configFile, { executeRoom } = {}) 
     const { nodeId, origin } = worker
     const transport = createWorkerTlsTransport({ origin, ...await loadTls(worker, 'worker client') })
     const client = createWorkerClient({ origin, nodeId, transport })
+    clients.set(nodeId, client)
     workers.set(nodeId, createRemoteWorkerAdapter({ client, nodeId }))
   }
+  const runRoom = groups?.roomBots === undefined ? executeRoom : createRoomExecutor({ roster: snapshot, roomBots: groups.roomBots, clients })
   const groupRuntime = groups === undefined ? undefined : createEmployeeGroupRuntime({
     ...groups.limits, store: await openEmployeeGroupStore(groups.directory),
     async execute(input) {
       const room = snapshot.rooms[input.roomId]
       if (!room?.people.includes(input.source.by)) throw invalid('room execution scope')
       // Room execution receives only room data and original actor attribution.
-      const reply = await executeRoom(Object.freeze({ ...input, room }))
+      const reply = await runRoom(Object.freeze({ ...input, room }))
       if (reply !== undefined && (reply?.roomId !== room.id || !room.members.includes(reply.by))) {
         throw invalid('room reply scope')
       }
