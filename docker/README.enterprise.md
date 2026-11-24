@@ -187,3 +187,42 @@ that account's invitation, credentials and login sessions. Start the same
 service after the offline command ends with `pilot_compose up -d --no-deps
 employee-pilot`. Use `pilot_compose down --volumes` only when discarding a
 disposable project.
+
+## Launch separate file policy and worker services
+
+Run each role as its own process with Node.js 24. Use the launcher under
+`bin/` in the installed DS Bot package. The worker also needs the public DSH
+packages at the pinned version, available through normal Node module resolution.
+Use a dedicated worker profile and private storage directories.
+
+```sh
+node /absolute/path/to/ds-bot/bin/ds-bot-enterprise-node.mjs policy --config /absolute/path/to/policy.mjs
+node /absolute/path/to/ds-bot/bin/ds-bot-enterprise-node.mjs worker --config /absolute/path/to/worker.mjs
+```
+
+Each configuration file is **trusted executable JavaScript** and runs with the
+service account's permissions. Restrict write access to the module and its
+imports to the deployment operator. Export the role's options as the default
+export. Use absolute paths for storage and TLS files. Keep credential material
+in private files and keep it out of configuration source and logs.
+
+- The policy options match `startFilePolicyRuntime`. Supply reservation and
+  evidence store paths, listener TLS options, and the trusted `canReserve` and
+  `authorizeScope` callbacks. With an evidence listener configured, enroll
+  disjoint `workerGrants` and `evidenceListener.producerGrants`. The launcher
+  creates the runtime's local evidence producer capability. An optional
+  `onReady` callback receives the listener origins and local `revoke` function.
+- The worker options match `createWorkerBootstrap`. Supply `config` and an
+  injected model `adapter`. File tools require explicit trusted `fileTools`
+  options. When using the outbox, supply `ingestEvidence` using the settlement
+  delivery callback and distinct worker and producer credentials. An optional
+  `onReady` callback receives the worker origin and, with an outbox configured,
+  the bounded `drainEvidence` function. Keep any operator access to these local
+  callbacks separate from employee traffic.
+
+Both commands print one JSON readiness record with the role and listener
+origins. They close their runtimes on SIGTERM or SIGINT. Startup failures use
+fixed diagnostics. Operator modules are responsible for keeping their own
+output private. Set `initialize: true` only to provision fresh stores and
+assign one writer per store. These commands are invoked independently of the
+employee Compose pilot.
