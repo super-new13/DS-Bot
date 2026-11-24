@@ -1,0 +1,158 @@
+import { randomUUID } from 'node:crypto'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+
+const validId = id => typeof id === 'string' && id.trim() !== ''
+const denied = () => Object.assign(new Error('Worker session operation refused'), { code: 'not-authorized' })
+const emptyInbox = agent => agent.inbox.nextStep.length === 0 && agent.inbox.nextTurn.length === 0
+
+// Inputs come from the authenticated host adapter, including the synchronous
+// current-authorization check. Mount in a dedicated DSH context with the worker
+// tool boundary already configured. Ownership here covers one employee and Bot.
+export function createWorkerSessionAdapter(ctx, { authorize, provider, model }) {
+  if (typeof authorize !== 'function' || !validId(provider) || !validId(model)) {
+    throw new TypeError('Worker requires authorization and an explicit model route')
+  }
+  const sessions = new Map()
+  const reservedKeys = new Set()
+
+  function allowed(scope, requestId) {
+    try { return authorize(scope, requestId) === true } catch { return false }
+  }
+
+  function canContinue(entry, run) {
+    if (!live(entry) || run.revoked) return false
+    if (allowed(entry.scope, run.requestId)) return true
+    run.revoked = true
+    return false
+  }
+
+  function live(entry) {
+    return !entry.tainted && ctx.agents.get(entry.scope.sessionId) === entry.agent
+  }
+
+  function owned({ sessionId, sessionKey, personId, botId }) {
+    const entry = sessions.get(sessionId)
+    if (!entry || entry.scope.sessionKey !== sessionKey || entry.scope.personId !== personId
+        || entry.scope.botId !== botId || !live(entry) || !allowed(entry.scope)) throw denied()
+    return entry
+  }
+
+  async function create({ sessionKey, personId, botId }) {
+    if (![sessionKey, personId, botId].every(validId)) throw denied()
+    if (reservedKeys.has(sessionKey)) throw denied()
+    const scope = Object.freeze({ sessionKey, personId, botId, sessionId: randomUUID() })
+    if (!allowed(scope)) throw denied()
+    reservedKeys.add(sessionKey)
+    try {
+      const handle = await ctx.agents.create({ sessionId: scope.sessionId, agentOptions: { provider, model } })
+      if (handle.agent.session.id !== scope.sessionId || !allowed(scope)) {
+        await handle.dispose()
+        throw denied()
+      }
+      sessions.set(scope.sessionId, { agent: handle.agent, scope, requests: new Set() })
+      return scope
+    } catch (error) {
+      reservedKeys.delete(sessionKey)
+      throw error
+    }
+  }
+
+  function emit(entry, run, fields) {
+    if (!canContinue(entry, run)) return
+    const { sessionId } = entry.scope
+    try { run.onEvent(Object.freeze({ sessionId, requestId: run.requestId, ...fields })) } catch {
+      // A consuming callback cannot disrupt DSH execution.
+    }
+  }
+
+  ctx.on('agent/pre-step', async ({ agent, messages, turn, step }, next) => {
+    const entry = sessions.get(agent.session.id)
+    if (!entry) return next()
+    const run = entry.active
+    const match = inputs => run !== undefined && (run.turn === undefined
+      ? inputs.length === 1 && inputs[0].id === run.messageId
+      : run.turn === turn && inputs.length === 0)
+    if (entry.agent !== agent || !live(entry)) return { kind: 'reject' }
+    if (!match(messages)) {
+      entry.tainted = true
+      return { kind: 'reject' }
+    }
+    if (!canContinue(entry, run)) return { kind: 'reject' }
+    const decision = await next()
+    if (decision.kind !== 'enter') return decision
+    if (entry.active !== run || !canContinue(entry, run)) return { kind: 'reject' }
+    if (!match(decision.messages)) {
+      entry.tainted = true
+      return { kind: 'reject' }
+    }
+    run.turn = turn
+    run.step = step
+    run.attempt = undefined
+    return decision
+  })
+
+  ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+    const entry = sessions.get(agent.session.id)
+    const run = entry?.active
+    if (entry?.agent !== agent || !run?.admitted || run.status !== undefined) return
+    if (frame.type === 'start' && frame.turn === run.turn && frame.step === run.step) {
+      run.attempt = frame.attemptId
+    } else if (frame.type === 'chunk' && frame.attemptId === run.attempt && frame.chunk.type === 'text-delta') {
+      emit(entry, run, { type: 'delta', text: frame.chunk.text })
+    }
+  })
+
+  ctx.on('session/event', (session, event) => {
+    const entry = sessions.get(session.id)
+    if (entry?.agent.session !== session) return
+    const run = entry.active
+    if (event.type === 'user/message') {
+      if (run?.turn !== undefined && event.data.id === run.messageId) run.admitted = true
+      else entry.tainted = true
+    }
+    if (!run?.admitted || event.data?.turn !== run.turn || run.status !== undefined) return
+    if (event.type === 'assistant/message' && !event.data.interrupted) {
+      const text = event.data.message.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('')
+      if (text !== '') emit(entry, run, { type: 'reply', text, seq: event.seq })
+    } else if (event.type === 'turn/end') {
+      const kind = event.data.reason.kind
+      run.status = kind === 'completed' || kind === 'aborted' ? kind : 'failed'
+    }
+  })
+
+  async function submit(input, onEvent = () => {}) {
+    const { requestId, text } = input
+    if (!validId(requestId) || !validId(text) || typeof onEvent !== 'function') throw new TypeError('Invalid worker submission')
+    const entry = owned(input)
+    const { agent, scope } = entry
+    if (entry.active || entry.requests.has(requestId) || agent.status !== 'idle' || !emptyInbox(agent)) throw denied()
+    const message = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] })
+    const run = { requestId, messageId: message.id, onEvent }
+    if (!canContinue(entry, run)) throw denied()
+    entry.requests.add(requestId)
+    entry.active = run
+    try {
+      agent.followup(message)
+      await agent.whenIdle()
+      if (!canContinue(entry, run)) throw denied()
+      const status = run.status ?? 'failed'
+      emit(entry, run, { type: 'done', status })
+      return { sessionId: scope.sessionId, requestId, status }
+    } finally {
+      entry.active = undefined
+    }
+  }
+
+  function cancel(input) {
+    const entry = owned(input)
+    const run = entry.active
+    if (!run?.admitted || run.requestId !== input.requestId || run.status !== undefined
+        || run.cancelRequested || entry.agent.status !== 'running' || !emptyInbox(entry.agent)
+        || !canContinue(entry, run)) throw denied()
+    run.cancelRequested = true
+    entry.agent.cancel({ kind: 'hook', reason: 'ds-bot/enterprise-worker-stop' }, { keepInbox: true })
+    return { accepted: true }
+  }
+
+  return { create, submit, cancel }
+}
