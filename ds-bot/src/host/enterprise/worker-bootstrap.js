@@ -29,23 +29,32 @@ async function loadPem(path) {
 }
 
 // File callbacks are accepted only as a programmatic dependency of the trusted entry.
-function snapshotFileTools(options) {
+function snapshotFileTools(options, nodeId) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) throw invalid()
-  const { root, path, workerOwned, readRules, isAuthorized, adjudicate, writeAudit, maxBytes = 256 * 1024 } = options
+  const { root, path, workerOwned, readRules, isAuthorized, adjudicate, writeAudit, permit, maxBytes = 256 * 1024 } = options
   const canonical = value => absolute(value) && !value.includes(String.fromCharCode(0)) && resolve(value) === value
   if (workerOwned !== true || !canonical(root) || root === sep || !canonical(path) || !path.startsWith(root + sep)
       || ![readRules, isAuthorized, adjudicate].every(callback => typeof callback === 'function')
       || (writeAudit !== undefined && typeof writeAudit !== 'function')
       || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 1024 * 1024) throw invalid()
-  return Object.freeze({ root, path, workerOwned, readRules, isAuthorized, adjudicate, writeAudit, maxBytes, operations: snapshotFileOperations(options.operations) })
+  let trustedPermit
+  if (permit !== undefined) {
+    const { nodeId: permitNode, path: permitPath, targetId, client } = permit ?? {}
+    if (permitNode !== nodeId || permitPath !== path || typeof targetId !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(targetId)
+        || typeof client?.reserve !== 'function') throw invalid()
+    trustedPermit = Object.freeze({ nodeId, path, targetId, client: Object.freeze({ reserve: client.reserve.bind(client) }) })
+  }
+  return Object.freeze({ root, path, workerOwned, readRules, isAuthorized, adjudicate, writeAudit, permit: trustedPermit,
+    maxBytes, operations: snapshotFileOperations(options.operations),
+  })
 }
 
 // The trusted DSH entry passes its administrator settings and model adapter
 // directly. This snapshots grants for the lifetime of the activated plugin.
 export function createWorkerBootstrap({ config, adapter, onReady, fileTools } = {}) {
   if (Object.hasOwn(config ?? {}, 'fileTools')) throw invalid()
-  const trustedFileTools = fileTools === undefined ? undefined : snapshotFileTools(fileTools)
   const { nodeId, provider, model, receiptPath, mappingPath, sessionRoot, auditFile, initialize = false, host, port, origin, certPaths, peerGrants } = config ?? {}
+  const trustedFileTools = fileTools === undefined ? undefined : snapshotFileTools(fileTools, nodeId)
   if (auditFile !== undefined && (!absolute(auditFile) || auditFile.includes(String.fromCharCode(0))
       || !trustedFileTools || trustedFileTools.writeAudit !== undefined)) throw invalid()
   if (!id(nodeId) || typeof provider !== 'string' || !provider.trim() || typeof model !== 'string' || !model.trim()

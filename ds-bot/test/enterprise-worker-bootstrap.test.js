@@ -118,18 +118,37 @@ class FileModel extends MockModel {
   }
 }
 
-for (const enabled of [false, true]) {
-  test('bootstrap guarded file replacement ' + (enabled ? 'explicitly enabled' : 'disabled by default'),
+for (const mode of ['disabled by default', 'explicitly enabled', 'fresh permit', 'lost permit', 'replayed permit', 'cancelled permit']) {
+  test('bootstrap guarded file replacement ' + mode,
     { timeout: 8000, skip: process.platform === 'win32' }, async t => {
+      const enabled = mode !== 'disabled by default'
+      const needsPermit = mode.endsWith('permit')
+      const writes = mode === 'explicitly enabled' || mode === 'fresh permit'
       const { profile, tls, scope, config } = fixture(t)
       const root = join(realpathSync(join(config.receiptPath, '..')), 'owned')
       mkdirSync(root, { mode: 0o700 })
       const path = join(root, 'note')
       writeFileSync(path, 'initial')
+      if (mode === 'cancelled permit') config.peerGrants[0].actions.push('cancel')
       const ready = Promise.withResolvers()
       const judgments = []
+      const reservations = []
+      const waiting = Promise.withResolvers()
+      const release = Promise.withResolvers()
+      t.after(() => release.resolve())
+      const permit = { nodeId: scope.nodeId, targetId: 'fixed-note', path, client: {
+        async reserve(proposed, { signal }) {
+          reservations.push({ proposed, signal })
+          if (mode === 'lost permit') throw Object.assign(new Error('Fixture response lost'), { code: 'reservation-outcome-unknown' })
+          if (mode === 'cancelled permit') {
+            waiting.resolve()
+            await release.promise
+          }
+          return { issued: mode !== 'replayed permit', status: 'reserved' }
+        },
+      } }
       const fileTools = {
-        root, path, workerOwned: true, maxBytes: 64,
+        root, path, workerOwned: true, maxBytes: 64, ...(needsPermit && { permit }),
         readRules: () => ({ version: 'v1', rules: [{ id: 'note', personId: scope.personId, botId: scope.botId, roomId: null,
           directory: root, grant: 'write', effect: 'allow', purpose: 'Update fixture note',
         }] }),
@@ -145,7 +164,12 @@ for (const enabled of [false, true]) {
       assert.throws(() => createWorkerBootstrap({ config: audited, adapter }), /Invalid administrator/)
       assert.throws(() => createWorkerBootstrap({ config: { ...audited, auditFile: 'relative.json' }, adapter, fileTools }), /Invalid administrator/)
       assert.throws(() => createWorkerBootstrap({ config: audited, adapter, fileTools: { ...fileTools, writeAudit() {} } }), /Invalid administrator/)
-      if (enabled) {
+      if (needsPermit) {
+        for (const mismatch of [{ nodeId: 'other' }, { path: join(root, 'other') }, { targetId: '../other' }]) {
+          assert.throws(() => createWorkerBootstrap({ config, adapter, fileTools: { ...fileTools, permit: { ...permit, ...mismatch } } }), /Invalid administrator/)
+        }
+      }
+      if (mode === 'explicitly enabled') {
         const corrupt = join(root, 'corrupt.json')
         writeFileSync(corrupt, '{invalid', { mode: 0o600 })
         await assert.rejects(createWorkerBootstrap({ config: { ...audited, auditFile: corrupt }, adapter, fileTools }).apply(profile),
@@ -165,14 +189,38 @@ for (const enabled of [false, true]) {
         onReady: ready.resolve, ...(enabled && { fileTools }),
       })
       fileTools.path = join(root, 'other')
+      permit.targetId = 'changed-after-bootstrap'
+      permit.client.reserve = () => assert.fail('replacement client called')
       await profile.plugin(bootstrap)
       const { origin } = await ready.promise
       const client = createWorkerClient({ origin, nodeId: scope.nodeId, transport: createWorkerTlsTransport({ ...tls.controller, origin }) })
       const owned = { ...scope, ...await client.create(scope) }
-      const result = await client.submit(owned, 'replace-note', 'Attempt fixture update')
-      assert.equal(result.status, 'completed')
-      assert.equal(readFileSync(path, 'utf8'), enabled ? 'updated' : 'initial')
+      const submitted = client.submit(owned, 'replace-note', 'Attempt fixture update')
+      if (mode === 'cancelled permit') {
+        await waiting.promise
+        const { signal } = reservations[0]
+        const aborted = signal.aborted ? Promise.resolve() : new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }))
+        assert.deepEqual(await client.cancel(owned, 'replace-note'), { accepted: true })
+        await aborted
+        release.resolve()
+      }
+      const result = await submitted
+      assert.equal(result.status, mode === 'cancelled permit' ? 'aborted' : 'completed')
+      assert.equal(readFileSync(path, 'utf8'), writes ? 'updated' : 'initial')
       assert.deepEqual(judgments, enabled ? ['note'] : [])
+      if (needsPermit) {
+        assert.equal(reservations.length, 1)
+        const { proposed, signal } = reservations[0]
+        assert.ok(signal instanceof AbortSignal)
+        assert.equal(signal.aborted, mode === 'cancelled permit')
+        assert.equal(proposed.nodeId, scope.nodeId)
+        assert.equal(proposed.sessionId, owned.sessionId)
+        assert.equal(proposed.targetId, 'fixed-note')
+        assert.equal(proposed.requestId, 'replace-note')
+        const { events } = JSON.parse(readFileSync(auditFile, 'utf8'))
+        assert.deepEqual(events.map(event => event.type), writes ? ['file-authorization', 'file-effect'] : ['file-authorization'])
+        return
+      }
       if (!enabled) {
         assert.throws(() => readFileSync(auditFile), { code: 'ENOENT' })
         return

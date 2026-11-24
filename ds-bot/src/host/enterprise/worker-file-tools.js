@@ -27,14 +27,14 @@ function toolInput(args, operation) {
 
 // The host selects a single target and the allowed operations.
 export function installWorkerFileTools(ctx, currentTurn, config) {
-  const { root, path, workerOwned, readRules, isAuthorized, adjudicate, writeAudit, maxBytes = 256 * 1024, operations } = config ?? {}
+  const { root, path, workerOwned, readRules, isAuthorized, adjudicate, writeAudit, permit, maxBytes = 256 * 1024, operations } = config ?? {}
   if (typeof root !== 'string' || typeof path !== 'string' || !path.startsWith(root + '/')
       || typeof isAuthorized !== 'function') throw new TypeError('Invalid worker file tool configuration')
   const enabled = new Set(snapshotFileOperations(operations))
   const { inspectVersion } = createWorkerFileEffects({ root, workerOwned, maxBytes, authorization: { consume: () => false } })
   const dispatches = new AsyncLocalStorage()
   const isLive = binding => binding?.open === true && !binding.signal.aborted && binding.turn.isCurrent()
-  const dispatch = createWorkerFileDispatch({ root, workerOwned, readRules, adjudicate, maxBytes, writeAudit,
+  const dispatch = createWorkerFileDispatch({ root, workerOwned, readRules, adjudicate, maxBytes, writeAudit, permit,
     isAuthorized(action) {
       const current = dispatches.getStore()
       return isLive(current) && action.dispatchId === current.callId && action.operation === current.operation
@@ -73,7 +73,7 @@ export function installWorkerFileTools(ctx, currentTurn, config) {
           const result = await dispatch({ personId, botId, roomId, sessionId, requestId, dispatchId: binding.callId }, {
             operation, path, version: operation === 'create' ? null : inspectVersion(path),
             ...(operation !== 'read' && { content: Buffer.from(binding.content) }),
-          })
+          }, { signal: binding.signal })
           if (operation === 'read') {
             if (!isLive(binding) || !Buffer.isBuffer(result.bytes) || result.bytes.length > maxBytes) throw refused()
             return new TextDecoder('utf-8', { fatal: true }).decode(result.bytes)
