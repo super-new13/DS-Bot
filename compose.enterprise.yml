@@ -1,0 +1,33 @@
+name: ds-bot-enterprise
+
+services:
+  dsh:
+    image: ds-bot-enterprise-dsh:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      DSH_HOST: "127.0.0.1"
+      DSH_LISTEN_PORT: "3080"
+      DSH_TELEMETRY_DISABLED: "1"
+    healthcheck:
+      test: ["CMD", "curl", "--silent", "--output", "/dev/null", "--max-time", "2", "http://127.0.0.1:3080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+    networks:
+      - enterprise-backend
+    volumes:
+      - enterprise-dsh-data:/data
+      - enterprise-dsh-workspace:/workspace
+    stop_grace_period: 15s
+
+networks:
+  enterprise-backend:
+    internal: true
+
+volumes:
+  enterprise-dsh-data:
+  enterprise-dsh-workspace:
