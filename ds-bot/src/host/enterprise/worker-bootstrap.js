@@ -31,7 +31,7 @@ async function loadPem(path) {
 // File callbacks are accepted only as a programmatic dependency of the trusted entry.
 function snapshotFileTools(options, nodeId) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) throw invalid()
-  const { root, path, workerOwned, readRules, isAuthorized, adjudicate, writeAudit, permit, maxBytes = 256 * 1024 } = options
+  const { root, path, workerOwned, readRules, isAuthorized, adjudicate, writeAudit, permit, onCompleted, maxBytes = 256 * 1024 } = options
   const canonical = value => absolute(value) && !value.includes(String.fromCharCode(0)) && resolve(value) === value
   if (workerOwned !== true || !canonical(root) || root === sep || !canonical(path) || !path.startsWith(root + sep)
       || ![readRules, isAuthorized, adjudicate].every(callback => typeof callback === 'function')
@@ -44,7 +44,8 @@ function snapshotFileTools(options, nodeId) {
         || typeof client?.reserve !== 'function') throw invalid()
     trustedPermit = Object.freeze({ nodeId, path, targetId, client: Object.freeze({ reserve: client.reserve.bind(client) }) })
   }
-  return Object.freeze({ root, path, workerOwned, readRules, isAuthorized, adjudicate, writeAudit, permit: trustedPermit,
+  if (onCompleted !== undefined && (!trustedPermit || typeof onCompleted !== 'function')) throw invalid()
+  return Object.freeze({ root, path, workerOwned, readRules, isAuthorized, adjudicate, writeAudit, permit: trustedPermit, onCompleted,
     maxBytes, operations: snapshotFileOperations(options.operations),
   })
 }

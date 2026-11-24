@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { X509Certificate } from 'node:crypto'
+import { createHash, X509Certificate } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -104,9 +104,11 @@ test('invalid grants and missing certificate files fail before receipt initializ
 
 class FileModel extends MockModel {
   steps = 0
+  toolResults = []
 
-  async *stream() {
+  async *stream({ messages }) {
     if (this.steps++ !== 0) {
+      this.toolResults.push(...messages.filter(message => message.role === 'tool'))
       yield* super.stream()
       return
     }
@@ -118,12 +120,12 @@ class FileModel extends MockModel {
   }
 }
 
-for (const mode of ['disabled by default', 'explicitly enabled', 'fresh permit', 'lost permit', 'replayed permit', 'cancelled permit']) {
+for (const mode of ['disabled by default', 'explicitly enabled', 'fresh permit', 'lost permit', 'replayed permit', 'cancelled permit', 'observer failure']) {
   test('bootstrap guarded file replacement ' + mode,
     { timeout: 8000, skip: process.platform === 'win32' }, async t => {
       const enabled = mode !== 'disabled by default'
-      const needsPermit = mode.endsWith('permit')
-      const writes = mode === 'explicitly enabled' || mode === 'fresh permit'
+      const needsPermit = mode.endsWith('permit') || mode === 'observer failure'
+      const writes = ['explicitly enabled', 'fresh permit', 'observer failure'].includes(mode)
       const { profile, tls, scope, config } = fixture(t)
       const root = join(realpathSync(join(config.receiptPath, '..')), 'owned')
       mkdirSync(root, { mode: 0o700 })
@@ -133,6 +135,7 @@ for (const mode of ['disabled by default', 'explicitly enabled', 'fresh permit',
       const ready = Promise.withResolvers()
       const judgments = []
       const reservations = []
+      const completions = []
       const waiting = Promise.withResolvers()
       const release = Promise.withResolvers()
       t.after(() => release.resolve())
@@ -148,7 +151,12 @@ for (const mode of ['disabled by default', 'explicitly enabled', 'fresh permit',
         },
       } }
       const fileTools = {
-        root, path, workerOwned: true, maxBytes: 64, ...(needsPermit && { permit }),
+        root, path, workerOwned: true, maxBytes: 64, ...(needsPermit && { permit,
+          onCompleted(event) {
+            completions.push({ event, bytes: readFileSync(path, 'utf8') })
+            if (mode === 'observer failure') throw new Error('Fixture recording failed')
+          },
+        }),
         readRules: () => ({ version: 'v1', rules: [{ id: 'note', personId: scope.personId, botId: scope.botId, roomId: null,
           directory: root, grant: 'write', effect: 'allow', purpose: 'Update fixture note',
         }] }),
@@ -165,6 +173,8 @@ for (const mode of ['disabled by default', 'explicitly enabled', 'fresh permit',
       assert.throws(() => createWorkerBootstrap({ config: { ...audited, auditFile: 'relative.json' }, adapter, fileTools }), /Invalid administrator/)
       assert.throws(() => createWorkerBootstrap({ config: audited, adapter, fileTools: { ...fileTools, writeAudit() {} } }), /Invalid administrator/)
       if (needsPermit) {
+        assert.throws(() => createWorkerBootstrap({ config, adapter, fileTools: { ...fileTools, permit: undefined } }), /Invalid administrator/)
+        assert.throws(() => createWorkerBootstrap({ config, adapter, fileTools: { ...fileTools, onCompleted: true } }), /Invalid administrator/)
         for (const mismatch of [{ nodeId: 'other' }, { path: join(root, 'other') }, { targetId: '../other' }]) {
           assert.throws(() => createWorkerBootstrap({ config, adapter, fileTools: { ...fileTools, permit: { ...permit, ...mismatch } } }), /Invalid administrator/)
         }
@@ -189,6 +199,7 @@ for (const mode of ['disabled by default', 'explicitly enabled', 'fresh permit',
         onReady: ready.resolve, ...(enabled && { fileTools }),
       })
       fileTools.path = join(root, 'other')
+      fileTools.onCompleted = () => assert.fail('replacement observer called')
       permit.targetId = 'changed-after-bootstrap'
       permit.client.reserve = () => assert.fail('replacement client called')
       await profile.plugin(bootstrap)
@@ -217,6 +228,24 @@ for (const mode of ['disabled by default', 'explicitly enabled', 'fresh permit',
         assert.equal(proposed.sessionId, owned.sessionId)
         assert.equal(proposed.targetId, 'fixed-note')
         assert.equal(proposed.requestId, 'replace-note')
+        if (writes) {
+          assert.deepEqual(completions, [{ event: { scope: proposed, status: 'completed' }, bytes: 'updated' }])
+          assert.equal(completions[0].event.scope, proposed)
+          assert.ok(Object.isFrozen(proposed) && Object.isFrozen(completions[0].event))
+          assert.deepEqual(proposed, { ...scope, sessionId: owned.sessionId, roomId: null, requestId: 'replace-note',
+            dispatchId: 'bootstrap-file-call', targetId: 'fixed-note', operation: 'modify', version: proposed.version,
+            contentDigest: createHash('sha256').update('updated').digest('hex'), ruleId: 'note', ruleVersion: 'v1',
+          })
+          assert.ok(proposed.version)
+        } else assert.deepEqual(completions, [])
+        if (mode === 'observer failure') {
+          assert.deepEqual(adapter.toolResults.at(-1)?.content, [{ type: 'text', text: 'File updated (evidence incomplete)' }])
+          assert.equal(adapter.toolResults.at(-1)?.isError === true, false)
+          const repeated = await client.submit(owned, 'replace-note', 'Attempt fixture update')
+          assert.equal(repeated.status, 'completed')
+          assert.equal(completions.length, 1)
+          assert.equal(reservations.length, 1)
+        }
         const { events } = JSON.parse(readFileSync(auditFile, 'utf8'))
         assert.deepEqual(events.map(event => event.type), writes ? ['file-authorization', 'file-effect'] : ['file-authorization'])
         return
