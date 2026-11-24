@@ -57,3 +57,31 @@ disabled until a runtime configuration enforces the approved tool and data
 boundaries. Future acceptance includes mock-model login, chat, SSE and
 revocation, validation of admin isolation, and backup and restore of accounts,
 authorizations, conversations, audits and business files.
+
+## Opt-in employee HTTPS pilot
+
+The employee service overrides the DSH Web entrypoint with the packaged CLI
+under /opt/dsh-template/profiles/web/node_modules/ds-bot/bin/. Build from a
+revision that includes ds-bot/bin/ds-bot-enterprise.mjs. The selected service
+publishes https://127.0.0.1:18443 and connects to an operator-configured worker
+over mTLS on a separate bridge network.
+
+Put config.json and the referenced TLS files in a dedicated host directory
+outside the Docker build context and readable by container UID 1000. Export DSBOT_ENTERPRISE_CONFIG_DIR with that
+absolute directory. The read-only mount is /run/dsbot-enterprise. Compose
+requires the source directory to exist. Use absolute container paths for TLS
+files. Set https.host to 0.0.0.0, https.port to 8443, and https.origin to
+https://127.0.0.1:18443 with a certificate for that origin. Set accountFile to
+/home/node/accounts.json on the dedicated employee volume. Enable
+initializeAccounts only for first-time provisioning.
+
+    docker compose --env-file /dev/null -f compose.enterprise.yml --profile employee-pilot config --quiet
+    node --test docker/test-enterprise.mjs
+
+With a local engine, disposable operator files and a fresh project, select
+only employee-pilot to avoid starting the DSH Web fixture.
+
+    docker compose --env-file /dev/null -f compose.enterprise.yml -p ds-bot-employee-smoke up --build employee-pilot
+
+Supply a reachable mock mTLS worker separately when testing chat. Use a fresh
+project name for each smoke test and remove its disposable volumes afterward.

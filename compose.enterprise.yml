@@ -24,10 +24,40 @@ services:
       - enterprise-dsh-workspace:/workspace
     stop_grace_period: 15s
 
+  employee-pilot:
+    profiles: [employee-pilot]
+    image: ds-bot-enterprise-dsh:local
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    entrypoint: ["node", "/opt/dsh-template/profiles/web/node_modules/ds-bot/bin/ds-bot-enterprise.mjs", "--config", "/run/dsbot-enterprise/config.json"]
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    working_dir: /home/node
+    ports:
+      - "127.0.0.1:18443:8443"
+    networks:
+      - employee-edge
+    volumes:
+      - type: bind
+        source: ${DSBOT_ENTERPRISE_CONFIG_DIR:-/nonexistent/dsbot-enterprise-pilot}
+        target: /run/dsbot-enterprise
+        read_only: true
+        bind:
+          create_host_path: false
+      # Docker seeds the named volume from the Node image's node-owned home.
+      - enterprise-employee-data:/home/node
+    stop_grace_period: 15s
+
 networks:
+  employee-edge:
   enterprise-backend:
     internal: true
 
 volumes:
   enterprise-dsh-data:
   enterprise-dsh-workspace:
+  enterprise-employee-data:
