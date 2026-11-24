@@ -7,7 +7,7 @@ const emptyInbox = agent => agent.inbox.nextStep.length === 0 && agent.inbox.nex
 
 // Inputs come from the authenticated host adapter, including the synchronous
 // current-authorization check. Mount in a dedicated DSH context with the worker
-// tool boundary already configured. Ownership here covers one employee and Bot.
+// tool boundary already configured. A room binding keeps the actor on the turn.
 export function createWorkerSessionAdapter(ctx, { authorize, provider, model, nodeId, mapping, sessionRoot }) {
   if (typeof authorize !== 'function' || !validId(provider) || !validId(model)) {
     throw new TypeError('Worker requires authorization and an explicit model route')
@@ -24,7 +24,7 @@ export function createWorkerSessionAdapter(ctx, { authorize, provider, model, no
 
   function canContinue(entry, run) {
     if (!live(entry) || run.revoked) return false
-    if (allowed(entry.scope, run.requestId)) return true
+    if (allowed(run.scope, run.requestId)) return true
     run.revoked = true
     return false
   }
@@ -33,31 +33,47 @@ export function createWorkerSessionAdapter(ctx, { authorize, provider, model, no
     return !entry.tainted && ctx.agents.get(entry.scope.sessionId) === entry.agent
   }
 
-  function owned({ sessionId, sessionKey, personId, botId }) {
+  function actorScope(scope, personId) {
+    return scope.roomId === undefined ? scope : Object.freeze({ ...scope, personId })
+  }
+
+  function owned({ sessionId, sessionKey, personId, botId, roomId, requestId }) {
     const entry = sessions.get(sessionId)
-    if (!entry || entry.scope.sessionKey !== sessionKey || entry.scope.personId !== personId
-        || entry.scope.botId !== botId || !live(entry) || !allowed(entry.scope)) throw denied()
+    if (!entry || !validId(personId) || entry.scope.sessionKey !== sessionKey || entry.scope.roomId !== roomId
+        || (roomId === undefined && entry.scope.personId !== personId) || entry.scope.botId !== botId
+        || !live(entry) || !allowed(actorScope(entry.scope, personId), roomId === undefined ? undefined : requestId)) throw denied()
     return entry
   }
 
-  async function openDurable({ sessionKey, personId, botId, sessionId }) {
-    if (sessionKey !== JSON.stringify([nodeId, botId, personId])) throw denied()
+  async function openDurable({ sessionKey, personId, botId, sessionId, roomId, requestId }) {
+    const inRoom = roomId !== undefined
+    if (!validId(personId) || (inRoom && (typeof roomId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(roomId)))
+        || sessionKey !== JSON.stringify(inRoom ? ['room', nodeId, botId, roomId] : [nodeId, botId, personId])) throw denied()
+    const authorized = scope => allowed(actorScope(scope, personId), inRoom ? requestId : undefined)
+    const resultFor = scope => {
+      const input = { ...actorScope(scope, personId), requestId }
+      return actorScope(owned(input).scope, personId)
+    }
     if (closing) throw denied()
     const pending = openings.get(sessionKey)
     if (pending) {
       const scope = await pending
       if (sessionId !== undefined && scope.sessionId !== sessionId) throw denied()
-      return owned(scope).scope
+      return resultFor(scope)
     }
     const opening = (async () => {
-      const owner = { nodeId, personId, botId }
+      const binding = inRoom ? { roomId } : { personId }
+      const owner = { nodeId, botId, ...binding }
       const saved = await mapping.lookup(owner)
       if (sessionId !== undefined && saved?.sessionId !== sessionId) throw denied()
-      const scope = Object.freeze({ sessionKey, personId, botId, sessionId: saved?.sessionId ?? randomUUID() })
-      if (!allowed(scope)) throw denied()
-      if (sessions.has(scope.sessionId)) return owned(scope).scope
+      const scope = Object.freeze({ sessionKey, botId, ...binding, sessionId: saved?.sessionId ?? randomUUID() })
+      if (!authorized(scope)) throw denied()
+      if (sessions.has(scope.sessionId)) {
+        resultFor(scope)
+        return scope
+      }
       const setup = (_agentCtx, agent) => ({ commit() {
-        if (!allowed(scope) || agent.session.id !== scope.sessionId || !emptyInbox(agent)) throw denied()
+        if (!authorized(scope) || agent.session.id !== scope.sessionId || !emptyInbox(agent)) throw denied()
       } })
       const agentOptions = { provider, model }
       const handle = saved
@@ -66,10 +82,10 @@ export function createWorkerSessionAdapter(ctx, { authorize, provider, model, no
       try {
         if (!saved) {
           await ctx.sessions.flush(handle.agent.session)
-          if (!allowed(scope)) throw denied()
+          if (!authorized(scope)) throw denied()
           await mapping.bind({ ...owner, sessionId: scope.sessionId })
         }
-        if (!allowed(scope)) throw denied()
+        if (!authorized(scope)) throw denied()
         handles.add(handle)
         sessions.set(scope.sessionId, { agent: handle.agent, scope, requests: new Set() })
         return scope
@@ -79,11 +95,12 @@ export function createWorkerSessionAdapter(ctx, { authorize, provider, model, no
       }
     })()
     openings.set(sessionKey, opening)
-    try { return await opening } finally { openings.delete(sessionKey) }
+    try { return resultFor(await opening) } finally { openings.delete(sessionKey) }
   }
 
-  async function create({ sessionKey, personId, botId }) {
-    if (mapping) return openDurable({ sessionKey, personId, botId })
+  async function create({ sessionKey, personId, botId, roomId }) {
+    if (mapping) return openDurable({ sessionKey, personId, botId, roomId })
+    if (roomId !== undefined) throw denied()
     if (![sessionKey, personId, botId].every(validId)) throw denied()
     if (reservedKeys.has(sessionKey)) throw denied()
     const scope = Object.freeze({ sessionKey, personId, botId, sessionId: randomUUID() })
@@ -106,7 +123,9 @@ export function createWorkerSessionAdapter(ctx, { authorize, provider, model, no
   function emit(entry, run, fields) {
     if (!canContinue(entry, run)) return
     const { sessionId } = entry.scope
-    try { run.onEvent(Object.freeze({ sessionId, requestId: run.requestId, ...fields })) } catch {
+    const { roomId, personId } = run.scope
+    const actor = roomId === undefined ? {} : { roomId, personId }
+    try { run.onEvent(Object.freeze({ sessionId, requestId: run.requestId, ...actor, ...fields })) } catch {
       // A consuming callback cannot disrupt DSH execution.
     }
   }
@@ -175,7 +194,7 @@ export function createWorkerSessionAdapter(ctx, { authorize, provider, model, no
     const { agent, scope } = entry
     if (entry.active || entry.requests.has(requestId) || agent.status !== 'idle' || !emptyInbox(agent)) throw denied()
     const message = createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] })
-    const run = { requestId, messageId: message.id, onEvent }
+    const run = { requestId, scope: actorScope(scope, input.personId), messageId: message.id, onEvent }
     if (!canContinue(entry, run)) throw denied()
     entry.requests.add(requestId)
     entry.active = run
@@ -195,7 +214,7 @@ export function createWorkerSessionAdapter(ctx, { authorize, provider, model, no
   function cancel(input) {
     const entry = owned(input)
     const run = entry.active
-    if (!run?.admitted || run.requestId !== input.requestId || run.status !== undefined
+    if (!run?.admitted || run.requestId !== input.requestId || run.scope.personId !== input.personId || run.status !== undefined
         || run.cancelRequested || entry.agent.status !== 'running' || !emptyInbox(entry.agent)
         || !canContinue(entry, run)) throw denied()
     run.cancelRequested = true

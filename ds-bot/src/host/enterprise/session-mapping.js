@@ -4,12 +4,14 @@ import { link, open, rename, unlink } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 const scopeFields = ['nodeId', 'personId', 'botId']
-const bindingFields = [...scopeFields, 'sessionId']
+const roomFields = ['nodeId', 'botId', 'roomId']
+const fieldsFor = scope => Object.hasOwn(scope ?? {}, 'roomId') ? roomFields : scopeFields
 const validId = id => typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id)
 const error = (code, message) => Object.assign(new Error(message), { code })
 const invalid = () => error('invalid-session-mapping', 'Invalid worker session mapping')
 const refused = () => error('not-authorized', 'Worker session mapping refused')
-const scopeKey = ({ nodeId, personId, botId }) => JSON.stringify([nodeId, personId, botId])
+const scopeKey = ({ nodeId, personId, botId, roomId }) => JSON.stringify(roomId === undefined
+  ? [nodeId, personId, botId] : ['room', nodeId, botId, roomId])
 const nativeKey = ({ nodeId, sessionId }) => JSON.stringify([nodeId, sessionId])
 
 function fieldsOf(value, fields) {
@@ -28,6 +30,7 @@ function decode(text) {
   const scopes = new Map()
   const sessions = new Set()
   for (const binding of state.bindings) {
+    const bindingFields = [...fieldsFor(binding), 'sessionId']
     if (!binding || Object.keys(binding).length !== bindingFields.length
         || !bindingFields.every(key => Object.hasOwn(binding, key) && validId(binding[key]))) throw invalid()
     const key = scopeKey(binding)
@@ -96,17 +99,17 @@ export async function openWorkerSessionMapping(file, { initialize = false } = {}
   }
 
   async function lookup(scope) {
-    const key = scopeKey(fieldsOf(scope, scopeFields))
+    const key = scopeKey(fieldsOf(scope, fieldsFor(scope)))
     return enqueue(async () => (await load()).scopes.get(key))
   }
 
   async function owns(input) {
-    const binding = fieldsOf(input, bindingFields)
+    const binding = fieldsOf(input, [...fieldsFor(input), 'sessionId'])
     return (await lookup(binding))?.sessionId === binding.sessionId
   }
 
   async function bind(input) {
-    const binding = Object.freeze(fieldsOf(input, bindingFields))
+    const binding = Object.freeze(fieldsOf(input, [...fieldsFor(input), 'sessionId']))
     return enqueue(async () => {
       const { state, scopes, sessions } = await load()
       const existing = scopes.get(scopeKey(binding))

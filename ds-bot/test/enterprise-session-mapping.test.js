@@ -74,3 +74,20 @@ test('refuses malformed or ambiguous state without replacing it', async t => {
     assert.equal(await readFile(file, 'utf8'), text)
   }
 })
+
+test('room bindings persist separately from private scopes and do not persist the actor', async t => {
+  const { file } = await fixture(t)
+  const mapping = await openWorkerSessionMapping(file, { initialize: true })
+  const room = { nodeId: alice.nodeId, botId: alice.botId, roomId: 'general', sessionId: 'room-session' }
+  await mapping.bind(alice)
+  assert.deepEqual(await mapping.bind({ ...room, personId: 'alice' }), room)
+  await assert.rejects(mapping.bind({ ...room, roomId: 'other' }), rejected)
+  await assert.rejects(mapping.bind({ ...room, sessionId: alice.sessionId }), rejected)
+  const reopened = await openWorkerSessionMapping(file)
+  assert.deepEqual(await reopened.lookup(alice), alice)
+  assert.deepEqual(await reopened.lookup({ ...room, personId: 'bob' }), room)
+  assert.equal(await reopened.owns({ ...room, personId: 'bob' }), true)
+  assert.equal(await reopened.owns({ ...room, roomId: 'other', personId: 'bob' }), false)
+  assert.equal(await reopened.owns({ ...alice, sessionId: room.sessionId }), false)
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')).bindings, [alice, room])
+})
