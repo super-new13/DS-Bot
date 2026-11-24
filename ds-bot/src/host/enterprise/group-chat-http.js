@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { canAccessEmployeeRoom } from './authorization.js'
 import { createEmployeeGroupAccess } from './group-access.js'
 
 const route = /^\/api\/enterprise\/group-chat\/([A-Za-z0-9_-]{1,128})\/(history|send)$/
@@ -74,9 +75,10 @@ export function createEmployeeGroupChatHandler({ origin, accounts, readRoster, r
   return async request => {
     const url = new URL(request.url)
     const target = route.exec(url.pathname)
-    if (!target) return error(404, 'Not found')
-    const [, roomId, operation] = target
-    const method = operation === 'history' ? 'GET' : 'POST'
+    const list = url.pathname === '/api/enterprise/group-chat/rooms'
+    if (!target && !list) return error(404, 'Not found')
+    const [, roomId, operation] = target ?? []
+    const method = list || operation === 'history' ? 'GET' : 'POST'
     if (request.method !== method) return error(405, 'Method not allowed', { Allow: method })
     const site = request.headers.get('sec-fetch-site')
     if (url.origin !== origin || (method === 'POST' && (request.headers.get('origin') !== origin
@@ -88,6 +90,15 @@ export function createEmployeeGroupChatHandler({ origin, accounts, readRoster, r
       const session = token === undefined ? undefined : await accounts.resolveSession(token)
       if (!session) return error(401, 'Invalid credentials')
       const identity = Object.freeze({ personId: session.personId, loginSessionId: session.loginSessionId })
+      if (list) {
+        if (!await accounts.isSessionActive(identity)) return error(401, 'Invalid credentials')
+        if (request.signal.aborted) return refused()
+        const roster = readRoster()
+        const rooms = Object.keys(roster.rooms ?? {}).sort()
+          .filter(id => /^[A-Za-z0-9_-]{1,128}$/.test(id) && canAccessEmployeeRoom(roster, identity.personId, id))
+          .map(id => ({ id }))
+        return Response.json({ rooms }, { headers })
+      }
       if (request.signal.aborted || !await access.canReadRoom(identity, roomId)) return refused()
       if (operation === 'history') {
         const history = projectHistory(await readHistory({ roomId, identity, signal: request.signal, limit: 100 }), roomId)

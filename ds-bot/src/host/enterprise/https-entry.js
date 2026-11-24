@@ -15,6 +15,7 @@ const groupRoute = /^\/api\/enterprise\/group-chat\/[A-Za-z0-9_-]{1,128}\/(histo
 export function employeeRoute(path) {
   const method = routes.get(path)
   if (method) return { method, group: false }
+  if (path === '/api/enterprise/group-chat/rooms') return { method: 'GET', group: true }
   const operation = groupRoute.exec(path)?.[1]
   if (operation) return { method: operation === 'history' ? 'GET' : 'POST', group: true }
 }

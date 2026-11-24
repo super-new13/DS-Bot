@@ -193,6 +193,13 @@ export function createEmployeeApi({ fetch: fetchRequest = (...args) => globalThi
       if (result?.accepted !== true) throw new EnterpriseApiError('invalid-response')
       return { accepted: true }
     },
+    async listRooms({ signal } = {}) {
+      const result = await json(expect(await request('group-chat/rooms', { signal }), 200))
+      if (!Array.isArray(result?.rooms) || result.rooms.some(room => typeof room?.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(room.id))) {
+        throw new EnterpriseApiError('invalid-response')
+      }
+      return result.rooms.map(({ id }) => ({ id }))
+    },
     async groupHistory(roomId, { signal } = {}) {
       const history = await json(expect(await request(groupPath(roomId, 'history'), { signal }), 200))
       if (history?.roomId !== roomId || !Array.isArray(history.messages)) throw new EnterpriseApiError('invalid-response')

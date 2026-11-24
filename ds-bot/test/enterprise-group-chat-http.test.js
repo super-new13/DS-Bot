@@ -152,3 +152,21 @@ test('queue rejection returns a generic error and invalidates the dispatch callb
   assert.deepEqual(await response.json(), { error: 'Chat unavailable' })
   assert.equal(await attempted, false)
 })
+
+test('room discovery returns only current memberships for the cookie identity', async () => {
+  const { handle, roster, sessions } = fixture()
+  roster.rooms.design = { id: 'design', people: ['alice'], internal: 'hidden' }
+  roster.rooms.operations = { id: 'operations', people: ['bob'] }
+  const alice = await handle(request('rooms', { headers: { 'X-Employee-Id': 'bob' } }))
+  assert.equal(alice.status, 200)
+  assert.equal(alice.headers.get('cache-control'), 'no-store')
+  assert.deepEqual(await alice.json(), { rooms: [{ id: 'design' }, { id: 'general' }] })
+  assert.deepEqual(await (await handle(request('rooms', { person: 'bob' }))).json(), { rooms: [{ id: 'general' }, { id: 'operations' }] })
+  assert.deepEqual(await (await handle(request('rooms', { person: 'eve' }))).json(), { rooms: [] })
+  roster.rooms.design.people = []
+  assert.deepEqual(await (await handle(request('rooms'))).json(), { rooms: [{ id: 'general' }] })
+  assert.equal((await handle(request('rooms', { person: null }))).status, 401)
+  sessions.delete(tokens.alice)
+  assert.equal((await handle(request('rooms'))).status, 401)
+  assert.equal((await handle(request('rooms', { method: 'POST' }))).status, 405)
+})

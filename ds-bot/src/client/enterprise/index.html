@@ -49,6 +49,19 @@
         </div>
       </form>
     </section>
+    <section class="card" id="rooms" aria-labelledby="rooms-title" hidden>
+      <h2 id="rooms-title">Rooms</h2>
+      <div class="actions">
+        <label>Room <select id="room-picker" disabled><option value="">Choose a room</option></select></label>
+        <button id="refresh-rooms" type="button">Refresh rooms</button>
+      </div>
+      <p id="room-status" role="status" class="feedback"></p>
+      <div id="room-messages" aria-label="Room messages"></div>
+      <form id="room-compose" hidden>
+        <label>Room message <textarea id="room-message" rows="3" required></textarea></label>
+        <button id="room-send" class="primary">Send to room</button>
+      </form>
+    </section>
   </main>
 </body>
 </html>

@@ -17,6 +17,12 @@ let person = null
 let run = null
 let transcriptBot
 let authBusy = false
+const picker = field('room-picker')
+const roomMessages = field('room-messages')
+const roomCompose = field('room-compose')
+let roomLoad
+let roomSending = false
+let roomTimer
 
 function feedback(id, text = '', error = false) {
   const node = field(id)
@@ -37,6 +43,9 @@ function setSession(session) {
   employee.hidden = !person
   employee.textContent = person?.personId ?? ''
   field('chat').hidden = !person
+  resetRooms()
+  field('rooms').hidden = !person
+  if (person) void loadRooms()
   logout.hidden = !person
   field('auth').hidden = Boolean(person)
 }
@@ -137,7 +146,7 @@ function setSending(sending) {
   stop.disabled = Boolean(run?.stopping)
 }
 
-function addMessage(author, label, text = '') {
+function messageBubble(author, label, text = '') {
   const bubble = document.createElement('div')
   const name = document.createElement('span')
   const body = document.createElement('p')
@@ -146,10 +155,15 @@ function addMessage(author, label, text = '') {
   name.textContent = label
   body.textContent = text
   bubble.append(name, body)
+  return bubble
+}
+
+function addMessage(author, label, text) {
+  const bubble = messageBubble(author, label, text)
   messages.append(bubble)
   field('empty').hidden = true
   scrollMessages()
-  return body
+  return bubble.lastElementChild
 }
 
 function scrollMessages() {
@@ -249,6 +263,101 @@ stop.addEventListener('click', async () => {
       setSending(true)
       feedback('chat-status', 'Could not confirm the stop request. Waiting for the chat result.', true)
     }
+  }
+})
+
+function resetRooms() {
+  clearTimeout(roomTimer)
+  roomLoad?.abort()
+  roomLoad = undefined
+  roomSending = false
+  picker.replaceChildren(new Option('Choose a room', ''))
+  picker.disabled = true
+  roomMessages.replaceChildren()
+  roomCompose.reset()
+  roomCompose.hidden = true
+  field('room-send').disabled = false
+  feedback('room-status')
+}
+
+async function loadRooms({ clear = false } = {}) {
+  if (!person || roomSending) return
+  clearTimeout(roomTimer)
+  roomLoad?.abort()
+  const job = new AbortController()
+  roomLoad = job
+  const signal = AbortSignal.any([job.signal, AbortSignal.timeout(5000)])
+  const selected = picker.value
+  if (clear) {
+    roomMessages.replaceChildren()
+    roomCompose.hidden = true
+    feedback('room-status', 'Checking room access…')
+  }
+  try {
+    const rooms = await api.listRooms({ signal })
+    if (signal.aborted) return
+    picker.replaceChildren(new Option('Choose a room', ''), ...rooms.map(({ id }) => new Option(id, id)))
+    picker.disabled = rooms.length === 0
+    if (!rooms.some(room => room.id === selected)) {
+      roomMessages.replaceChildren()
+      roomCompose.reset()
+      roomCompose.hidden = true
+      feedback('room-status', selected ? 'Room access was removed.' : rooms.length ? 'Choose a room to read messages.' : 'No rooms assigned.', Boolean(selected))
+      return
+    }
+    picker.value = selected
+    const history = await api.groupHistory(selected, { signal })
+    if (signal.aborted) return
+    roomMessages.replaceChildren(...history.messages.filter(row => row && typeof row.text === 'string')
+      .map(row => messageBubble(row.by === person.personId ? 'you' : 'room', row.name || row.by || (row.kind === 'bot' ? 'Bot' : 'Employee'), row.text)))
+    roomCompose.hidden = false
+    feedback('room-status', history.messages.length ? '' : 'No messages yet.')
+  } catch (error) {
+    if (job.signal.aborted) return
+    if (error.status === 401) return sessionEnded()
+    roomMessages.replaceChildren()
+    roomCompose.reset()
+    roomCompose.hidden = true
+    if (error.status === 403) picker.querySelector('option:checked')?.remove()
+    feedback('room-status', error.status === 403 ? 'Room access was removed.' : 'Could not load rooms. Refresh to try again.', true)
+  } finally {
+    if (roomLoad === job) roomTimer = setTimeout(() => { void loadRooms() }, 5000)
+  }
+}
+
+picker.addEventListener('change', () => {
+  roomCompose.reset()
+  void loadRooms({ clear: true })
+})
+field('refresh-rooms').addEventListener('click', () => { void loadRooms({ clear: true }) })
+roomCompose.addEventListener('submit', async event => {
+  event.preventDefault()
+  const selected = picker.value
+  const draft = field('room-message')
+  if (!person || roomSending || roomCompose.hidden || !selected || !draft.value.trim()) return
+  clearTimeout(roomTimer)
+  roomLoad?.abort()
+  const job = new AbortController()
+  roomLoad = job
+  roomSending = picker.disabled = field('room-send').disabled = true
+  let failure
+  try {
+    await api.sendGroup(selected, draft.value, { signal: AbortSignal.any([job.signal, AbortSignal.timeout(10000)]) })
+    if (!job.signal.aborted) draft.value = ''
+  } catch (error) {
+    failure = error
+  }
+  if (job.signal.aborted) return
+  roomSending = picker.disabled = field('room-send').disabled = false
+  if (failure?.status === 401) return sessionEnded()
+  if (failure?.status === 403) {
+    roomMessages.replaceChildren()
+    roomCompose.reset()
+    roomCompose.hidden = true
+  }
+  await loadRooms({ clear: failure?.status === 403 })
+  if (person && picker.value === selected && !roomCompose.hidden && failure) {
+    feedback('room-status', 'Could not confirm the send. Check the room before trying again.', true)
   }
 })
 
