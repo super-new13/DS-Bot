@@ -2,9 +2,11 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { X509Certificate } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { createFileEvidenceTlsClient } from '../src/host/enterprise/file-evidence-tls.js'
 import { startFilePolicyRuntime } from '../src/host/enterprise/file-policy-runtime.js'
 import { createFileReservationTlsClient } from '../src/host/enterprise/file-reservation-tls.js'
 
@@ -28,6 +30,7 @@ function makeTls(dir) {
   }
   return { server: issue('server', ['extendedKeyUsage=serverAuth', 'subjectAltName=IP:127.0.0.1']),
     worker: issue('worker', ['extendedKeyUsage=clientAuth']),
+    producer: issue('producer', ['extendedKeyUsage=clientAuth']),
   }
 }
 
@@ -55,7 +58,10 @@ async function fixture(t) {
     const client = createFileReservationTlsClient({ origin: runtime.origin, ...tls.worker })
     return { runtime, client }
   }
-  return { settings, trustedProducer, start }
+  const separated = { resolveWorker: undefined, workerGrants: [{ fingerprint, nodeId: scope.nodeId }], evidenceListener: {
+    tls: tls.server, producerGrants: [{ fingerprint: new X509Certificate(tls.producer.cert).fingerprint256, nodeId: scope.nodeId }],
+  } }
+  return { settings, trustedProducer, start, tls, separated }
 }
 
 const posix = { timeout: 8000, skip: process.platform === 'win32' }
@@ -98,5 +104,54 @@ test('policy runtime releases the reservation store when opening evidence fails'
   await assert.rejects(start({ initialize: true }), { code: 'invalid-settlement-evidence' })
   assert.equal(readFileSync(settings.evidenceFile, 'utf8'), 'corrupt fixture')
   const recovered = await start({ initialize: true, evidenceFile: settings.evidenceFile + '.recovered' })
+  assert.deepEqual(await recovered.client.reserve(scope), { issued: true, status: 'reserved' })
+})
+
+test('evidence listener requires explicit disjoint registries and settles exact evidence after restart', posix, async t => {
+  const { settings, start, tls, separated } = await fixture(t)
+  await assert.rejects(start({ ...separated, resolveWorker: settings.resolveWorker }), /explicit worker and producer registries/)
+  await assert.rejects(start({ ...separated, workerGrants: undefined }), /identity registry/)
+  await assert.rejects(start({ ...separated, workerGrants: separated.evidenceListener.producerGrants }), /registries overlap/)
+  const [worker] = separated.workerGrants
+  await assert.rejects(start({ ...separated, workerGrants: [{ ...worker, fingerprint: worker.fingerprint.toLowerCase() }] }), /identity grant/)
+  const first = await start({ ...separated, initialize: true })
+  const proof = { scope, status: 'completed', evidenceId: 'effect-a' }
+  const publish = createFileEvidenceTlsClient({ origin: first.runtime.evidenceOrigin, ...tls.producer })
+  const unauthorized = createFileEvidenceTlsClient({ origin: first.runtime.evidenceOrigin, ...tls.worker })
+  const producerOnReservations = createFileReservationTlsClient({ origin: first.runtime.origin, ...tls.producer })
+  await assert.rejects(producerOnReservations.reserve(scope), refused)
+  await assert.rejects(unauthorized(proof), { code: 'evidence-refused' })
+  await assert.rejects(publish({ ...proof, scope: { ...scope, nodeId: 'different' } }), { code: 'evidence-refused' })
+  assert.deepEqual(await first.client.reserve(scope), { issued: true, status: 'reserved' })
+  assert.equal(await first.runtime.revoke(scope.personId), 'pending')
+  await assert.rejects(first.client.settle(scope, proof.status, proof.evidenceId), refused)
+  assert.deepEqual(await publish(proof), { inserted: true })
+  assert.deepEqual(await publish(proof), { inserted: false })
+  await first.runtime.close()
+  await assert.rejects(publish(proof), { code: 'evidence-outcome-unknown' })
+  await assert.rejects(first.client.reserve(scope), { code: 'reservation-outcome-unknown' })
+
+  const reopened = await start(separated)
+  const retry = createFileEvidenceTlsClient({ origin: reopened.runtime.evidenceOrigin, ...tls.producer })
+  assert.deepEqual(await retry(proof), { inserted: false })
+  assert.equal(await reopened.runtime.revoke(scope.personId), 'pending')
+  await assert.rejects(reopened.client.settle({ ...scope, targetId: 'other' }, proof.status, proof.evidenceId), refused)
+  assert.deepEqual(await reopened.client.settle(scope, proof.status, proof.evidenceId), { revocation: 'revoked' })
+})
+
+test('policy runtime rolls back its reservation listener when evidence binding fails', posix, async t => {
+  const { start, settings, separated } = await fixture(t)
+  const socket = createServer()
+  await new Promise((resolve, reject) => socket.once('error', reject).listen(0, '127.0.0.1', resolve))
+  const closeSocket = () => new Promise((resolve, reject) => socket.close(error => error ? reject(error) : resolve()))
+  const { port } = socket.address()
+  await closeSocket()
+  const binding = { ...separated, listener: { ...settings.listener, port },
+    evidenceListener: { ...separated.evidenceListener, port },
+  }
+  await assert.rejects(start({ ...binding, initialize: true }), { code: 'EADDRINUSE' })
+  const recovered = await start({ ...binding, evidenceListener: separated.evidenceListener })
+  assert.equal(recovered.runtime.address.port, port)
+  assert.notEqual(recovered.runtime.evidenceAddress.port, port)
   assert.deepEqual(await recovered.client.reserve(scope), { issued: true, status: 'reserved' })
 })
