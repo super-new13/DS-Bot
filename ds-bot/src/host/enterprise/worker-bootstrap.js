@@ -1,6 +1,7 @@
 import { constants } from 'node:fs'
-import { open } from 'node:fs/promises'
-import { isAbsolute, resolve, sep } from 'node:path'
+import { open, realpath } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { openFileAuditStore } from './file-audit-store.js'
 import { apply as applyWorker } from './worker-plugin.js'
 import { snapshotFileOperations } from './worker-file-tools.js'
 
@@ -44,7 +45,9 @@ function snapshotFileTools(options) {
 export function createWorkerBootstrap({ config, adapter, onReady, fileTools } = {}) {
   if (Object.hasOwn(config ?? {}, 'fileTools')) throw invalid()
   const trustedFileTools = fileTools === undefined ? undefined : snapshotFileTools(fileTools)
-  const { nodeId, provider, model, receiptPath, mappingPath, sessionRoot, initialize = false, host, port, origin, certPaths, peerGrants } = config ?? {}
+  const { nodeId, provider, model, receiptPath, mappingPath, sessionRoot, auditFile, initialize = false, host, port, origin, certPaths, peerGrants } = config ?? {}
+  if (auditFile !== undefined && (!absolute(auditFile) || auditFile.includes(String.fromCharCode(0))
+      || !trustedFileTools || trustedFileTools.writeAudit !== undefined)) throw invalid()
   if (!id(nodeId) || typeof provider !== 'string' || !provider.trim() || typeof model !== 'string' || !model.trim()
       || !absolute(receiptPath) || typeof initialize !== 'boolean' || !Array.isArray(peerGrants) || !peerGrants.length
       || typeof adapter?.stream !== 'function' || typeof adapter.resolveModel !== 'function'
@@ -68,13 +71,33 @@ export function createWorkerBootstrap({ config, adapter, onReady, fileTools } = 
     name: 'enterprise-worker-bootstrap',
     async apply(profile) {
       const [ca, cert, key] = await Promise.all([loadPem(caPath), loadPem(certPath), loadPem(keyPath)])
-      return applyWorker(profile, {
+      const options = {
         nodeId, provider, model, receiptPath, mappingPath, sessionRoot, initialize, host, port, origin, adapter, onReady, tls: { ca, cert, key },
         allowRooms, fileTools: trustedFileTools,
         authorizePeer: (fingerprint, { scope, action }) => grants.some(grant => grant.fingerprint === fingerprint
           && matches(grant, scope) && grant.actions.has(action)),
         authorizeSession: scope => grants.some(grant => matches(grant, scope)),
-      })
+      }
+      if (auditFile === undefined) return applyWorker(profile, options)
+
+      const canonicalFile = async file => join(await realpath(dirname(file)), basename(file))
+      const auditPath = await canonicalFile(auditFile)
+      for (const other of [receiptPath, mappingPath, trustedFileTools.path, caPath, certPath, keyPath]) {
+        if (other !== undefined && auditPath === await canonicalFile(other)) throw invalid()
+      }
+      const audit = await openFileAuditStore(auditPath, { initialize })
+      try {
+        const stopWorker = await applyWorker(profile, {
+          ...options, fileTools: { ...trustedFileTools, writeAudit: audit.writeAudit },
+        })
+        let closing
+        return () => closing ??= (async () => {
+          try { await stopWorker() } finally { await audit.close() }
+        })()
+      } catch (error) {
+        await audit.close()
+        throw error
+      }
     },
   }
 }

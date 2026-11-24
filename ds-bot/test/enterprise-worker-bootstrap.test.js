@@ -139,12 +139,31 @@ for (const enabled of [false, true]) {
           return { verdict: 'allow', ruleId: rule.id, ruleVersion: rule.version, reason: 'Fixture permits replacement' }
         },
       }
+      const auditFile = join(root, 'audit.json')
+      const audited = { ...config, auditFile }
       const adapter = new FileModel()
+      assert.throws(() => createWorkerBootstrap({ config: audited, adapter }), /Invalid administrator/)
+      assert.throws(() => createWorkerBootstrap({ config: { ...audited, auditFile: 'relative.json' }, adapter, fileTools }), /Invalid administrator/)
+      assert.throws(() => createWorkerBootstrap({ config: audited, adapter, fileTools: { ...fileTools, writeAudit() {} } }), /Invalid administrator/)
+      if (enabled) {
+        const corrupt = join(root, 'corrupt.json')
+        writeFileSync(corrupt, '{invalid', { mode: 0o600 })
+        await assert.rejects(createWorkerBootstrap({ config: { ...audited, auditFile: corrupt }, adapter, fileTools }).apply(profile),
+          { code: 'invalid-file-audit' })
+        assert.equal(readFileSync(corrupt, 'utf8'), '{invalid')
+        await assert.rejects(createWorkerBootstrap({ config: { ...audited, auditFile: path }, adapter, fileTools }).apply(profile), /Invalid administrator/)
+        assert.throws(() => readFileSync(config.receiptPath), { code: 'ENOENT' })
+        const failed = createWorkerBootstrap({ config: audited, adapter, fileTools, onReady() { throw new Error('fixture failed after activation') } })
+        await assert.rejects(failed.apply(profile), /fixture failed after activation/)
+      }
       assert.throws(() => createWorkerBootstrap({ config: { ...config, fileTools: {} }, adapter }), /Invalid administrator/)
       assert.throws(() => createWorkerBootstrap({ config, adapter, fileTools: { ...fileTools, isAuthorized: true } }), /Invalid administrator/)
       assert.throws(() => createWorkerBootstrap({ config, adapter, fileTools: { ...fileTools, path: config.receiptPath } }), /Invalid administrator/)
       assert.throws(() => createWorkerBootstrap({ config, adapter, fileTools: { ...fileTools, maxBytes: 0 } }), /Invalid administrator/)
-      const bootstrap = createWorkerBootstrap({ config, adapter, onReady: ready.resolve, ...(enabled && { fileTools }) })
+      const trusted = { ...fileTools }
+      const bootstrap = createWorkerBootstrap({ config: enabled ? audited : config, adapter,
+        onReady: ready.resolve, ...(enabled && { fileTools }),
+      })
       fileTools.path = join(root, 'other')
       await profile.plugin(bootstrap)
       const { origin } = await ready.promise
@@ -154,5 +173,32 @@ for (const enabled of [false, true]) {
       assert.equal(result.status, 'completed')
       assert.equal(readFileSync(path, 'utf8'), enabled ? 'updated' : 'initial')
       assert.deepEqual(judgments, enabled ? ['note'] : [])
+      if (!enabled) {
+        assert.throws(() => readFileSync(auditFile), { code: 'ENOENT' })
+        return
+      }
+      const before = JSON.parse(readFileSync(auditFile, 'utf8'))
+      assert.deepEqual(before.events.map(({ type, outcome }) => [type, outcome]), [
+        ['file-authorization', undefined], ['file-effect', 'completed'],
+      ])
+      await profile.fiber.dispose()
+      const restarted = new Context()
+      t.after(() => restarted.fiber.dispose())
+      const nextReady = Promise.withResolvers()
+      await restarted.plugin(createWorkerBootstrap({ config: { ...audited, initialize: false }, adapter: new FileModel(),
+        fileTools: { ...trusted, isAuthorized: action => action.requestId === 'replace-again' }, onReady: nextReady.resolve,
+      }))
+      const next = await nextReady.promise
+      const nextClient = createWorkerClient({ origin: next.origin, nodeId: scope.nodeId,
+        transport: createWorkerTlsTransport({ ...tls.controller, origin: next.origin }),
+      })
+      const nextScope = { ...scope, ...await nextClient.create(scope) }
+      assert.equal((await nextClient.submit(nextScope, 'replace-again', 'Run another authorized update')).status, 'completed')
+      await restarted.fiber.dispose()
+      const after = JSON.parse(readFileSync(auditFile, 'utf8'))
+      assert.deepEqual(after.events.slice(0, 2), before.events)
+      assert.deepEqual(after.events.slice(2).map(({ requestId, verdict }) => [requestId, verdict]), [
+        ['replace-again', 'allowed'], ['replace-again', 'allowed'],
+      ])
     })
 }
