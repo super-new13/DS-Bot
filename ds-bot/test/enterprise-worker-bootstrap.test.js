@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { X509Certificate } from 'node:crypto'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -101,3 +101,58 @@ test('invalid grants and missing certificate files fail before receipt initializ
   await assert.rejects(bootstrap.apply(profile), { code: 'ENOENT' })
   assert.throws(() => readFileSync(config.receiptPath), { code: 'ENOENT' })
 })
+
+class FileModel extends MockModel {
+  steps = 0
+
+  async *stream() {
+    if (this.steps++ !== 0) {
+      yield* super.stream()
+      return
+    }
+    const name = 'worker_replace_file'
+    const id = 'bootstrap-file-call'
+    yield { type: 'block-start', index: 0, blockType: 'tool-call', id, name }
+    yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name, arguments: JSON.stringify({ content: 'updated' }) } }
+    yield { type: 'finish', reason: { kind: 'tool-use' } }
+  }
+}
+
+for (const enabled of [false, true]) {
+  test('bootstrap guarded file replacement ' + (enabled ? 'explicitly enabled' : 'disabled by default'),
+    { timeout: 8000, skip: process.platform === 'win32' }, async t => {
+      const { profile, tls, scope, config } = fixture(t)
+      const root = join(realpathSync(join(config.receiptPath, '..')), 'owned')
+      mkdirSync(root, { mode: 0o700 })
+      const path = join(root, 'note')
+      writeFileSync(path, 'initial')
+      const ready = Promise.withResolvers()
+      const judgments = []
+      const fileTools = {
+        root, path, workerOwned: true, maxBytes: 64,
+        readRules: () => ({ version: 'v1', rules: [{ id: 'note', personId: scope.personId, botId: scope.botId, roomId: null,
+          directory: root, grant: 'write', effect: 'allow', purpose: 'Update fixture note',
+        }] }),
+        isAuthorized: action => action.personId === scope.personId && action.requestId === 'replace-note',
+        adjudicate({ rule }) {
+          judgments.push(rule.id)
+          return { verdict: 'allow', ruleId: rule.id, ruleVersion: rule.version, reason: 'Fixture permits replacement' }
+        },
+      }
+      const adapter = new FileModel()
+      assert.throws(() => createWorkerBootstrap({ config: { ...config, fileTools: {} }, adapter }), /Invalid administrator/)
+      assert.throws(() => createWorkerBootstrap({ config, adapter, fileTools: { ...fileTools, isAuthorized: true } }), /Invalid administrator/)
+      assert.throws(() => createWorkerBootstrap({ config, adapter, fileTools: { ...fileTools, path: config.receiptPath } }), /Invalid administrator/)
+      assert.throws(() => createWorkerBootstrap({ config, adapter, fileTools: { ...fileTools, maxBytes: 0 } }), /Invalid administrator/)
+      const bootstrap = createWorkerBootstrap({ config, adapter, onReady: ready.resolve, ...(enabled && { fileTools }) })
+      fileTools.path = join(root, 'other')
+      await profile.plugin(bootstrap)
+      const { origin } = await ready.promise
+      const client = createWorkerClient({ origin, nodeId: scope.nodeId, transport: createWorkerTlsTransport({ ...tls.controller, origin }) })
+      const owned = { ...scope, ...await client.create(scope) }
+      const result = await client.submit(owned, 'replace-note', 'Attempt fixture update')
+      assert.equal(result.status, 'completed')
+      assert.equal(readFileSync(path, 'utf8'), enabled ? 'updated' : 'initial')
+      assert.deepEqual(judgments, enabled ? ['note'] : [])
+    })
+}
