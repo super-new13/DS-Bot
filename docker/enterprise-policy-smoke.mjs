@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url'
 
 const role = basename(fileURLToPath(import.meta.url), '.mjs')
 const config = name => fileURLToPath(new URL(name, import.meta.url))
-const state = name => join(process.cwd(), name)
+const stateRoot = join(process.cwd(), 'smoke-state')
+const state = name => join(stateRoot, name)
 const load = name => import(new URL('../node_modules/ds-bot/src/host/enterprise/' + name + '.js', import.meta.url))
 const tls = name => ({ ca: readFileSync(config('ca.pem')), cert: readFileSync(config(name + '.pem')), key: readFileSync(config(name + '.key')) })
 const fingerprint = name => new X509Certificate(readFileSync(config(name + '.pem'))).fingerprint256
@@ -162,7 +163,10 @@ async function verifyWorker(phase) {
 
 const action = process.argv[2]
 let options
-if (role === action && process.argv[3] === '--config') options = await (role === 'policy' ? policyOptions() : workerOptions())
+if (role === action && process.argv[3] === '--config') {
+  mkdirSync(stateRoot, { mode: 0o700 })
+  options = await (role === 'policy' ? policyOptions() : workerOptions())
+}
 else if (action === 'ready') assert.equal(readFileSync(readyFile, 'utf8'), 'ready')
 else if (role === 'controller' && action === 'submit') await submit()
 else if (role === 'policy' && action === 'revoke-pending') assert.equal(await command('revoke'), 'pending')
