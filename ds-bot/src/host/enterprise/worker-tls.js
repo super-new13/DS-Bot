@@ -6,7 +6,6 @@ import { checkServerIdentity } from 'node:tls'
 
 const paths = new Set(['create', 'submit', 'cancel', 'status'].map(action => '/internal/enterprise/worker/' + action))
 const requestFields = ['content-type', 'content-encoding']
-const routeAllowed = url => paths.has(url.pathname) && !url.search && !url.hash
 const validLimit = value => Number.isSafeInteger(value) && value >= 1 && value <= 2 ** 31 - 1
 const transportError = code => Object.assign(new Error(code), { code })
 
@@ -37,13 +36,18 @@ async function requestBytes(request, limit, signal) {
 
 // Trust roots and the client identity are supplied by the caller. The HTTPS
 // origin also sets the identity used for Node's standard certificate check.
-export function createWorkerTlsTransport({ origin, ca, cert, key, timeoutMs = 30000, maxBodyBytes = 65536 }) {
+export function createWorkerTlsTransport(options) {
+  return createInternalTlsTransport(options, paths)
+}
+
+export function createInternalTlsTransport({ origin, ca, cert, key, timeoutMs = 30000, maxBodyBytes = 65536 }, allowedPaths) {
+  const routes = new Set(allowedPaths)
   const expected = new URL(origin)
   if (expected.protocol !== 'https:' || expected.origin !== origin || !ca || !cert || !key
       || !validLimit(timeoutMs) || !validLimit(maxBodyBytes)) throw new TypeError('Invalid worker TLS client configuration')
   return async request => {
     const url = new URL(request.url)
-    if (url.origin !== origin || !routeAllowed(url) || request.method !== 'POST' || request.redirect !== 'error') {
+    if (url.origin !== origin || !routes.has(url.pathname) || url.search || url.hash || request.method !== 'POST' || request.redirect !== 'error') {
       throw transportError('worker-route-refused')
     }
     const signal = AbortSignal.any([request.signal, AbortSignal.timeout(timeoutMs)])
@@ -82,8 +86,13 @@ export function createWorkerTlsTransport({ origin, ca, cert, key, timeoutMs = 30
 
 // The bind address and the HTTPS authority can differ on a private network.
 // The worker handler applies peer grants to the verified leaf fingerprint.
-export async function startLocalWorkerTls({ ca, cert, key, handler, host = '127.0.0.1', port = 0, origin,
-  timeoutMs = 30000, maxBodyBytes = 65536, maxConnections = 32 }) {
+export async function startLocalWorkerTls(options) {
+  return startInternalTls(options, paths)
+}
+
+export async function startInternalTls({ ca, cert, key, handler, host = '127.0.0.1', port = 0, origin,
+  timeoutMs = 30000, maxBodyBytes = 65536, maxConnections = 32 }, allowedPaths) {
+  const routes = new Set(allowedPaths)
   if (!ca || !cert || !key || typeof handler !== 'function'
       || ![timeoutMs, maxBodyBytes, maxConnections].every(validLimit)
       || typeof host !== 'string' || !host.trim() || !Number.isInteger(port) || port < 0 || port > 65535) {
@@ -108,7 +117,7 @@ export async function startLocalWorkerTls({ ca, cert, key, handler, host = '127.
     void (async () => {
       const fingerprint = req.socket.getPeerCertificate().fingerprint256
       if (!req.socket.authorized || !fingerprint) return reject(403)
-      if (req.headersDistinct.host?.length !== 1 || req.headers.host?.toLowerCase() !== authority || !paths.has(req.url)) return reject(404)
+      if (req.headersDistinct.host?.length !== 1 || req.headers.host?.toLowerCase() !== authority || !routes.has(req.url)) return reject(404)
       if (req.method !== 'POST') return reject(405)
       if (Number(req.headers['content-length']) > maxBodyBytes) return reject(413)
       const chunks = []
