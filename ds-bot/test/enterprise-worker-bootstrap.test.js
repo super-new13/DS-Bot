@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { openFileSettlementEvidence } from '../src/host/enterprise/file-settlement-evidence.js'
 import { createWorkerClient } from '../src/host/enterprise/worker-client.js'
 import { createWorkerBootstrap } from '../src/host/enterprise/worker-bootstrap.js'
 import { createWorkerTlsTransport } from '../src/host/enterprise/worker-tls.js'
@@ -279,3 +280,77 @@ for (const mode of ['disabled by default', 'explicitly enabled', 'fresh permit',
       ])
     })
 }
+
+test('bootstrap retains exact completion until trusted ingestion acknowledges it',
+  { timeout: 10000, skip: process.platform === 'win32' }, async t => {
+    const { profile, tls, scope, config } = fixture(t)
+    const root = join(realpathSync(join(config.receiptPath, '..')), 'owned')
+    mkdirSync(root, { mode: 0o700 })
+    const path = join(root, 'note')
+    writeFileSync(path, 'initial')
+    const reservationScopes = []
+    const fileTools = { root, path, workerOwned: true,
+      permit: { nodeId: scope.nodeId, path, targetId: 'note', client: {
+        reserve(proposed) { reservationScopes.push(proposed); return { issued: true, status: 'reserved' } },
+      } },
+      readRules: () => ({ version: 'v1', rules: [{ id: 'note', personId: scope.personId, botId: scope.botId, roomId: null,
+        directory: root, grant: 'write', effect: 'allow', purpose: 'Update fixture note',
+      }] }),
+      isAuthorized: () => true,
+      adjudicate: ({ rule }) => ({ verdict: 'allow', ruleId: rule.id, ruleVersion: rule.version, reason: 'Fixture approval' }),
+    }
+    const outboxFile = join(root, 'outbox.json')
+    const configured = { ...config, auditFile: join(root, 'audit.json'), outboxFile }
+    const producer = Symbol('trusted test producer')
+    const center = await openFileSettlementEvidence(join(root, 'center.json'), { trustedProducer: producer, initialize: true })
+    try {
+      let loseAcknowledgment = true
+      const deliveries = []
+      const ingestEvidence = async entry => {
+        deliveries.push(entry)
+        const acknowledgment = await center.ingest(producer, entry)
+        if (loseAcknowledgment) throw new Error('Fixture acknowledgment lost')
+        return acknowledgment
+      }
+      const options = { config: configured, adapter: new FileModel(), fileTools, ingestEvidence, onReady() {} }
+      assert.throws(() => createWorkerBootstrap({ ...options, fileTools: { ...fileTools, permit: undefined } }), /Invalid administrator/)
+      assert.throws(() => createWorkerBootstrap({ ...options, fileTools: { ...fileTools, onCompleted() {} } }), /Invalid administrator/)
+      for (const alias of [path, configured.auditFile, configured.receiptPath]) {
+        const bootstrap = createWorkerBootstrap({ ...options, config: { ...configured, outboxFile: alias } })
+        await assert.rejects(bootstrap.apply(profile), /Invalid administrator/)
+      }
+      assert.throws(() => readFileSync(configured.receiptPath), { code: 'ENOENT' })
+      const broken = createWorkerBootstrap({ ...options, onReady() { throw new Error('Fixture startup failed') } })
+      await assert.rejects(broken.apply(profile), /Fixture startup failed/)
+
+      const ready = Promise.withResolvers()
+      await profile.plugin(createWorkerBootstrap({ ...options, onReady: ready.resolve }))
+      const { origin, drainEvidence } = await ready.promise
+      const client = createWorkerClient({ origin, nodeId: scope.nodeId, transport: createWorkerTlsTransport({ ...tls.controller, origin }) })
+      const owned = { ...scope, ...await client.create(scope) }
+      assert.equal((await client.submit(owned, 'outbox-request', 'Update fixture note')).status, 'completed')
+      assert.equal(readFileSync(path, 'utf8'), 'updated')
+      assert.equal(deliveries.length, 0)
+      const persisted = JSON.parse(readFileSync(outboxFile, 'utf8')).entries
+      assert.equal(persisted.length, 1)
+      assert.deepEqual(persisted[0].scope, reservationScopes[0])
+      assert.equal(persisted[0].status, 'completed')
+      await assert.rejects(drainEvidence({ limit: 1 }), /Fixture acknowledgment lost/)
+      assert.deepEqual(JSON.parse(readFileSync(outboxFile, 'utf8')).entries, persisted)
+      await profile.fiber.dispose()
+      await assert.rejects(drainEvidence(), { code: 'invalid-effect-outbox' })
+
+      const restarted = new Context()
+      try {
+        const reopened = Promise.withResolvers()
+        await restarted.plugin(createWorkerBootstrap({ ...options, config: { ...configured, initialize: false }, onReady: reopened.resolve }))
+        const operator = await reopened.promise
+        loseAcknowledgment = false
+        assert.deepEqual(await operator.drainEvidence({ limit: 1 }), { acknowledged: 1 })
+        assert.deepEqual(deliveries, [persisted[0], persisted[0]])
+        assert.equal(await center.verifySettlement(scope.nodeId, persisted[0]), true)
+        assert.deepEqual(await operator.drainEvidence(), { acknowledged: 0 })
+        assert.deepEqual(JSON.parse(readFileSync(outboxFile, 'utf8')).entries, [])
+      } finally { await restarted.fiber.dispose() }
+    } finally { await center.close() }
+  })
