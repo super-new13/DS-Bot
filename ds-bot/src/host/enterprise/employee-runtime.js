@@ -1,6 +1,7 @@
 import { isAbsolute } from 'node:path'
 import { openEmployeeAccountStore } from './account-store.js'
 import { createEmployeeAccounts } from './accounts.js'
+import { loadEmployeeSite } from './employee-site.js'
 import { createEmployeeServiceHandler } from './enterprise-service.js'
 import { startEnterpriseHttpsEntry } from './https-entry.js'
 import { createEnterpriseRuntimeRoster } from './runtime-roster.js'
@@ -17,9 +18,10 @@ export async function startEmployeeRuntime({ accountFile, initializeAccounts = f
   const options = { ...https }
   const roster = createEnterpriseRuntimeRoster({ readConfig, workers })
   roster.readRoster()
+  const employeeAsset = await loadEmployeeSite()
   const store = await openEmployeeAccountStore(accountFile, { initialize: initializeAccounts })
   const accounts = createEmployeeAccounts(store)
   const handler = createEmployeeServiceHandler({ origin: options.origin, accounts, ...roster, limits, readHistory, enqueueGroup })
-  const entry = await startEnterpriseHttpsEntry({ ...options, handler })
+  const entry = await startEnterpriseHttpsEntry({ ...options, handler, employeeAsset })
   return { address: entry.address, close: entry.close, accounts }
 }

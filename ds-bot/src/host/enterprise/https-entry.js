@@ -68,10 +68,17 @@ async function writeResponse(res, output, signal) {
   await pipeline(Readable.fromWeb(output.body), res, { signal })
 }
 
-async function handle(req, res, { origin, authority, handler, maxBodyBytes, bodyTimeoutMs }) {
-  const path = req.url?.split('?', 1)[0]
-  const method = employeeRoute(path)?.method
-  if (req.headersDistinct.host?.length !== 1 || req.headers.host?.toLowerCase() !== authority || !method) return reject(res, 404)
+async function handle(req, res, { origin, authority, handler, employeeAsset, maxBodyBytes, bodyTimeoutMs }) {
+  if (req.headersDistinct.host?.length !== 1 || req.headers.host?.toLowerCase() !== authority) return reject(res, 404)
+  const method = employeeRoute(req.url?.split('?', 1)[0])?.method
+  if (!method) {
+    const asset = employeeAsset?.(req.url)
+    if (!asset) return reject(res, 404)
+    if (req.method !== 'GET' && req.method !== 'HEAD') return reject(res, 405, { Allow: 'GET, HEAD' })
+    if (req.headers['transfer-encoding'] || Number(req.headers['content-length']) > 0) return reject(res, 400)
+    res.writeHead(200, asset.headers).end(req.method === 'HEAD' ? undefined : asset.body)
+    return
+  }
   if (req.method !== method) return reject(res, 405, { Allow: method })
   const headers = new Headers()
   for (const name of requestFields) {
@@ -100,7 +107,7 @@ async function handle(req, res, { origin, authority, handler, maxBodyBytes, body
 }
 
 // Returns the bound address and an idempotent close which aborts live connections.
-export async function startEnterpriseHttpsEntry({ tls, origin, handler, host = '127.0.0.1', port = 0,
+export async function startEnterpriseHttpsEntry({ tls, origin, handler, employeeAsset, host = '127.0.0.1', port = 0,
   maxBodyBytes = 65536, bodyTimeoutMs = 5000, headersTimeoutMs = 10000, idleTimeoutMs = 60000,
   maxConnections = 128 } = {}) {
   const publicUrl = new URL(origin)
@@ -110,7 +117,7 @@ export async function startEnterpriseHttpsEntry({ tls, origin, handler, host = '
     if (!Number.isSafeInteger(value) || value < 1 || value > 2 ** 31 - 1) throw new RangeError('Invalid HTTPS entry limit')
   }
   const sockets = new Set()
-  const options = { origin, authority: publicUrl.host, handler, maxBodyBytes, bodyTimeoutMs }
+  const options = { origin, authority: publicUrl.host, handler, employeeAsset, maxBodyBytes, bodyTimeoutMs }
   const server = createServer({ ...tls, insecureHTTPParser: false, headersTimeout: headersTimeoutMs,
     requestTimeout: Math.min(2 ** 31 - 1, headersTimeoutMs + bodyTimeoutMs),
     connectionsCheckingInterval: Math.min(headersTimeoutMs, bodyTimeoutMs, 1000),
