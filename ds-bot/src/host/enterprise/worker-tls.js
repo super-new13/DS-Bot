@@ -80,13 +80,21 @@ export function createWorkerTlsTransport({ origin, ca, cert, key, timeoutMs = 30
   }
 }
 
-// This bridge binds only loopback. The worker handler applies peer grants to
-// the verified leaf fingerprint passed here and to its own operation scopes.
-export async function startLocalWorkerTls({ ca, cert, key, handler, timeoutMs = 30000, maxBodyBytes = 65536, maxConnections = 32 }) {
+// The bind address and the HTTPS authority can differ on a private network.
+// The worker handler applies peer grants to the verified leaf fingerprint.
+export async function startLocalWorkerTls({ ca, cert, key, handler, host = '127.0.0.1', port = 0, origin,
+  timeoutMs = 30000, maxBodyBytes = 65536, maxConnections = 32 }) {
   if (!ca || !cert || !key || typeof handler !== 'function'
-      || ![timeoutMs, maxBodyBytes, maxConnections].every(validLimit)) throw new TypeError('Invalid local worker TLS configuration')
+      || ![timeoutMs, maxBodyBytes, maxConnections].every(validLimit)
+      || typeof host !== 'string' || !host.trim() || !Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new TypeError('Invalid local worker TLS configuration')
+  }
+  if (origin === undefined ? host !== '127.0.0.1'
+    : typeof origin !== 'string' || !origin.startsWith('https://') || URL.parse(origin)?.origin !== origin) {
+    throw new TypeError('Expected an explicit canonical HTTPS worker origin')
+  }
   const sockets = new Set()
-  let origin
+  let authority = origin === undefined ? undefined : new URL(origin).host
   const server = createServer({
     ca, cert, key, requestCert: true, rejectUnauthorized: true, minVersion: 'TLSv1.2', handshakeTimeout: timeoutMs,
     headersTimeout: timeoutMs, requestTimeout: timeoutMs, connectionsCheckingInterval: Math.min(timeoutMs, 1000),
@@ -100,7 +108,7 @@ export async function startLocalWorkerTls({ ca, cert, key, handler, timeoutMs = 
     void (async () => {
       const fingerprint = req.socket.getPeerCertificate().fingerprint256
       if (!req.socket.authorized || !fingerprint) return reject(403)
-      if (req.headersDistinct.host?.length !== 1 || req.headers.host !== new URL(origin).host || !paths.has(req.url)) return reject(404)
+      if (req.headersDistinct.host?.length !== 1 || req.headers.host?.toLowerCase() !== authority || !paths.has(req.url)) return reject(404)
       if (req.method !== 'POST') return reject(405)
       if (Number(req.headers['content-length']) > maxBodyBytes) return reject(413)
       const chunks = []
@@ -145,11 +153,13 @@ export async function startLocalWorkerTls({ ca, cert, key, handler, timeoutMs = 
   })
   await new Promise((resolve, reject) => {
     server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => { server.off('error', reject); resolve() })
+    server.listen(port, host, () => { server.off('error', reject); resolve() })
   })
-  origin = 'https://127.0.0.1:' + server.address().port
+  const address = server.address()
+  origin ??= 'https://127.0.0.1:' + address.port
+  authority ??= new URL(origin).host
   let closing
-  return { origin, close() {
+  return { origin, address, close() {
     return closing ??= new Promise((resolve, reject) => {
       server.close(error => error ? reject(error) : resolve())
       for (const socket of sockets) socket.destroy()

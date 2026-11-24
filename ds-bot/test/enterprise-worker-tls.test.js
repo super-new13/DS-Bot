@@ -33,7 +33,7 @@ before(() => {
     return { ca, cert: readFileSync(join(dir, name + '.pem')), key: readFileSync(join(dir, name + '.key')) }
   }
   certs = {
-    server: sign('server', 'serverAuth', 'IP:127.0.0.1'),
+    server: sign('server', 'serverAuth', 'IP:127.0.0.1,DNS:localhost'),
     wrongHost: sign('wrong-host', 'serverAuth', 'DNS:worker.example.test'),
     controller: sign('controller', 'clientAuth'),
     stranger: sign('stranger', 'clientAuth'),
@@ -137,4 +137,26 @@ test('transport deadlines cover stalled response headers and response body', { t
   const fast = createWorkerTlsTransport({ ...certs.controller, origin: slow.origin, timeoutMs: 250 })
   const response = await fast(post(slow.origin, 'status'))
   await assert.rejects(response.text(), /abort/i)
+})
+
+test('worker binding accepts an explicit port and independently enforces HTTPS authority', { timeout: 5000 }, async t => {
+  const expectedPeer = new X509Certificate(certs.controller.cert).fingerprint256
+  const handler = (request, peer) => peer.fingerprint === expectedPeer
+    ? Response.json({ origin: new URL(request.url).origin }) : new Response(null, { status: 403 })
+  const ephemeral = await startLocalWorkerTls({ ...certs.server, handler })
+  const { port } = ephemeral.address
+  await ephemeral.close()
+  const origin = 'https://localhost:' + port
+  const entry = await startLocalWorkerTls({ ...certs.server, handler, host: '127.0.0.1', port, origin })
+  t.after(entry.close)
+  assert.equal(entry.address.address, '127.0.0.1')
+  assert.equal(entry.address.port, port)
+  assert.equal(entry.origin, origin)
+  const transport = createWorkerTlsTransport({ ...certs.controller, origin })
+  assert.deepEqual(await (await transport(post(origin, 'status'))).json(), { origin })
+  assert.equal(await raw('https://127.0.0.1:' + port, root + 'status', certs.controller), 404)
+  assert.equal(await raw(origin, root + 'status', certs.stranger, expectedPeer), 403)
+  await assert.rejects(startLocalWorkerTls({ ...certs.server, handler, host: '0.0.0.0' }), /canonical HTTPS worker origin/)
+  await assert.rejects(startLocalWorkerTls({ ...certs.server, handler, origin: 'http://localhost' }), /canonical HTTPS worker origin/)
+  await assert.rejects(startLocalWorkerTls({ ...certs.server, handler, port: 65536 }), /Invalid local worker TLS configuration/)
 })

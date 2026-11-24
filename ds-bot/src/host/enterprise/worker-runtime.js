@@ -13,7 +13,7 @@ const validId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.t
 // Transfer ownership of a dedicated, isolated DSH Context to this runtime.
 // Grants are live, synchronous checks against trusted worker configuration.
 export async function startLocalWorkerRuntime({ ctx, nodeId, provider, model, receiptPath, initialize = false,
-  tls, authorizePeer, authorizeSession, limits = {} }) {
+  tls, host, port, origin, authorizePeer, authorizeSession, limits = {} }) {
   if (!ctx?.agents || !ctx.fiber || !validId(nodeId) || !provider?.trim() || !model?.trim()
       || typeof receiptPath !== 'string' || !isAbsolute(receiptPath)
       || typeof authorizePeer !== 'function' || typeof authorizeSession !== 'function'
@@ -59,14 +59,14 @@ export async function startLocalWorkerRuntime({ ctx, nodeId, provider, model, re
     })
     let handle
     const { maxBodyBytes, maxActive, timeoutMs, maxConnections } = limits
-    listener = await startLocalWorkerTls({ ...tls, maxBodyBytes, timeoutMs, maxConnections,
+    listener = await startLocalWorkerTls({ ...tls, host, port, origin, maxBodyBytes, timeoutMs, maxConnections,
       handler: (request, peer) => handle ? handle(request, peer) : new Response(null, { status: 503 }),
     })
     handle = createWorkerHttpHandler({ nodeId, origin: listener.origin, worker, receipts, maxBodyBytes, maxActive,
       authenticatePeer: peer => peer?.fingerprint,
       authorizePeer: (fingerprint, operation) => !closed && authorizePeer(fingerprint, operation) === true,
     })
-    return { origin: listener.origin, close }
+    return { origin: listener.origin, address: listener.address, close }
   } catch (error) {
     await close()
     throw error
