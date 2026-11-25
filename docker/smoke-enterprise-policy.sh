@@ -7,8 +7,9 @@ config_only=0
 for option in "$@"; do
   case "$option" in
     --employee) employee=1 ;;
+    --policy-only) employee=0 ;;
     --config-only) config_only=1 ;;
-    *) printf 'Usage: %s [--employee] [--config-only]\n' "$0" >&2; exit 2 ;;
+    *) printf 'Usage: %s [--employee|--policy-only] [--config-only]\n' "$0" >&2; exit 2 ;;
   esac
 done
 [[ -f compose.enterprise.yml && -f docker/enterprise-policy-smoke.mjs ]] || exit 2
