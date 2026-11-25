@@ -287,3 +287,32 @@ page keeps the token in memory and clears it when the page is left or the
 clear button is used. The owner API requires the canonical HTTPS Origin and
 `Authorization: Bearer` credential. The worker audit view returns 503 until
 an adapter to its existing writer is configured.
+
+### Owner console smoke
+
+Run the owner and employee flow with:
+
+    bash docker/smoke-enterprise-policy.sh --employee
+
+Use --employee --config-only to verify the generated fixture and rule mounts
+locally without Docker. The full run also validates the merged Compose model.
+Its HTTPS probe runs inside the employee container and uses the public HTTPS
+origin for the Host and Origin headers. The fixture asserts owner admission,
+invite and revoke, transcript reads, the unavailable audit route, rule changes,
+and a create-only grant with an actual creation and denied modification.
+
+The employee configuration uses owner.tokenHash for the lowercase SHA-256
+hex digest of the owner bearer token. The owner.transcriptDirectory must be a
+private pre-existing directory. The employee service writes owner.ruleFile
+and owner.initializeRules provisions it on first startup. Mount the rule file's
+parent directory into the policy and worker services read-only so they see
+atomic replacements. Give the policy a trusted resolveTarget callback for the
+worker's configured target.
+
+To compute the digest from a private file holding just the token and an optional
+trailing newline, pass its path to this command:
+
+    python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read().rstrip(bytes([13,10]))).hexdigest())' < /private/owner-token
+
+The smoke generates a disposable token per run, stores only its digest in the
+employee configuration, and supplies the token to the probe over stdin.

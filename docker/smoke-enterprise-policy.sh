@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Run from the repository root. --config-only renders without contacting Docker Engine.
+# Run from the repository root. --config-only checks the generated fixture without Docker.
 set +x
 employee=0
 config_only=0
@@ -80,16 +80,21 @@ cat > "$scratch/fixture.json" <<JSON
 }}
 JSON
 if [[ $employee == 1 ]]; then
-  mkdir "$scratch/employee"
+  mkdir "$scratch/employee" "$scratch/rules"
+  # All containers use UID 1000. The host scratch parent remains mode 0700.
+  chmod 777 "$scratch/rules"
   export DSBOT_ENTERPRISE_CONFIG_DIR="$scratch/employee"
   issue employee "$scratch/employee" $'extendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1'
   cp "$scratch/controller/controller.pem" "$scratch/controller/controller.key" "$scratch/ca/ca.pem" "$scratch/employee/"
   cp docker/enterprise-policy-smoke.mjs "$scratch/employee/employee.mjs"
+  cp docker/enterprise-employee-smoke.py "$scratch/employee/entry-smoke.py"
   chmod 755 "$scratch/employee"
   chmod 644 "$scratch/employee/"*
   employee_port=$(python3 - "$scratch" "$project" <<'PYCONFIG'
+import hashlib
 import json
 import pathlib
+import secrets
 import socket
 import sys
 
@@ -99,7 +104,10 @@ with socket.socket() as sock:
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
 mount = "/run/dsbot-enterprise/"
-config = dict(accountFile="/home/node/smoke-accounts.json", https=dict(
+token = secrets.token_urlsafe(32)
+(scratch / "owner-token").write_text(token + "\n")
+config = dict(initializeAccounts=True, owner=dict(tokenHash=hashlib.sha256(token.encode()).hexdigest(),
+    transcriptDirectory="/home/node/smoke-transcripts", ruleFile="/run/dsbot-smoke-rules/rules.json", initializeRules=True), accountFile="/home/node/smoke-accounts.json", https=dict(
     host="0.0.0.0", port=8443, origin=f"https://127.0.0.1:{port}",
     certFile=mount + "employee.pem", keyFile=mount + "employee.key"),
     workers=[dict(nodeId="node", origin="https://worker:9445", caFile=mount + "ca.pem",
@@ -115,12 +123,44 @@ model = json.loads(fixture.read_text())
 model["services"]["worker"]["environment"] = {"DSBOT_SMOKE_EMPLOYEE": "1"}
 model["services"]["employee-pilot"] = dict(image=project + ":employee", networks=["file-operations"],
     healthcheck=dict(test=["CMD", "node", mount + "employee.mjs", "employee-ready"], interval="1s", timeout="3s", retries=30))
+# Mount the directory so readers see subsequent atomic replacements.
+for service in ("employee-pilot", "file-policy", "worker"):
+    target = model["services"][service]
+    target.setdefault("volumes", []).append(dict(type="bind", source=str(scratch / "rules"),
+        target="/run/dsbot-smoke-rules", read_only=service != "employee-pilot", bind=dict(create_host_path=False)))
+    if service != "employee-pilot":
+        target.setdefault("environment", {})["DSBOT_SMOKE_OWNER"] = "1"
 fixture.write_text(json.dumps(model))
 # An override replaces the default pilot port instead of adding another mapping.
 (scratch / "employee-ports.yml").write_text(f'services:\n  employee-pilot:\n    ports: !override ["127.0.0.1:{port}:8443"]\n')
 print(port)
 PYCONFIG
   )
+fi
+if [[ $config_only == 1 ]]; then
+  python3 - "$scratch" "$employee" <<'PYCHECK'
+import hashlib
+import json
+import pathlib
+import sys
+
+scratch = pathlib.Path(sys.argv[1])
+services = json.loads((scratch / "fixture.json").read_text())["services"]
+assert all(not service.get("ports") for service in services.values())
+if sys.argv[2] == "1":
+    owner = json.loads((scratch / "employee/config.json").read_text())["owner"]
+    digest = hashlib.sha256((scratch / "owner-token").read_text().strip().encode()).hexdigest()
+    assert owner == dict(tokenHash=digest, transcriptDirectory="/home/node/smoke-transcripts",
+                         ruleFile="/run/dsbot-smoke-rules/rules.json", initializeRules=True)
+    for name in ("employee-pilot", "file-policy", "worker"):
+        volume, = services[name]["volumes"]
+        assert volume["source"] == str(scratch / "rules") and volume["target"] == "/run/dsbot-smoke-rules"
+        assert volume["read_only"] == (name != "employee-pilot")
+    assert services["employee-pilot"]["networks"] == ["file-operations"]
+    assert (scratch / "owner-token").stat().st_mode & 0o077 == 0
+print("Disposable smoke configuration passed")
+PYCHECK
+  exit 0
 fi
 compose --profile file-policy --profile worker --profile smoke ${extra_profiles[@]+"${extra_profiles[@]}"} config --format json | python3 -c '
 import json, sys
@@ -130,7 +170,7 @@ for role in ("file-policy", "worker", "smoke-controller"):
     s = m["services"][role]
     assert not s.get("ports") and not s.get("network_mode")
     assert list(s["networks"]) == ["file-operations"]
-    assert s["volumes"][0]["read_only"]
+    assert all(v["read_only"] for v in s["volumes"] if v["type"] == "bind")
 assert not m["services"]["dsh"].get("ports")
 if "employee-pilot" in m["services"]:
     entry = m["services"]["employee-pilot"]
@@ -138,27 +178,33 @@ if "employee-pilot" in m["services"]:
     assert port["host_ip"] == "127.0.0.1" and port["target"] == 8443
     assert str(port["published"]) == sys.argv[1]
     assert set(entry["networks"]) == {"employee-edge", "file-operations"}
-    assert entry["volumes"][0]["read_only"]
+    for role in ("file-policy", "worker", "employee-pilot"):
+        mount, = [v for v in m["services"][role]["volumes"] if v["target"] == "/run/dsbot-smoke-rules"]
+        assert mount["read_only"] == (role != "employee-pilot")
     print("Employee HTTPS is the only published port and binds to loopback")
 else:
     print("Rendered roles use a private network and publish zero ports")' "${employee_port:-}"
-[[ $config_only == 0 ]] || exit 0
 docker version --format '{{.Server.Version}}'
 started=1
 compose build file-policy
-compose up -d --no-build --wait --wait-timeout 45 file-policy worker
 if [[ $employee == 1 ]]; then
   compose build employee-pilot
   compose run --rm -T --no-deps --entrypoint node employee-pilot \
-    /run/dsbot-enterprise/employee.mjs seed-invite > "$scratch/invite"
+    -e 'require("node:fs").mkdirSync("/home/node/smoke-transcripts", {mode: 0o700})'
   compose up -d --no-build --wait --wait-timeout 45 employee-pilot
-  python3 docker/enterprise-employee-smoke.py "$scratch" "$employee_port" > "$scratch/request-id"
-  IFS= read -r request_id < "$scratch/request-id"
+fi
+compose up -d --no-build --wait --wait-timeout 45 file-policy worker
+if [[ $employee == 1 ]]; then
+  compose exec -T employee-pilot python3 /run/dsbot-enterprise/entry-smoke.py "$employee_port" \
+    < "$scratch/owner-token" > "$scratch/request-id"
+  rm -- "$scratch/owner-token"
+  { IFS= read -r request_id; IFS= read -r denied_request_id; } < "$scratch/request-id"
+  compose exec -T worker node /app/config/worker.mjs verify-write "$request_id" "$denied_request_id"
 else
   compose run --rm --no-deps smoke-controller
   request_id=fixture-request
+  compose exec -T worker node /app/config/worker.mjs verify-write "$request_id"
 fi
-compose exec -T worker node /app/config/worker.mjs verify-write "$request_id"
 compose exec -T file-policy node /app/config/policy.mjs revoke-pending
 compose exec -T worker node /app/config/worker.mjs verify-pending
 compose exec -T worker node /app/config/worker.mjs drain

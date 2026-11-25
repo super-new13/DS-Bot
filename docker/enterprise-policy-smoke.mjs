@@ -19,6 +19,8 @@ const reservationOrigin = 'https://file-policy:9443'
 const evidenceOrigin = 'https://file-policy:9444'
 const workerOrigin = 'https://worker:9445'
 const host = '0.0.0.0'
+const ownerMode = process.env.DSBOT_SMOKE_OWNER === '1'
+const ruleFile = '/run/dsbot-smoke-rules/rules.json'
 const scope = { nodeId: 'node', personId: 'alice', botId: 'helper' }
 const requestId = 'fixture-request'
 const validEmployeeRequest = id => typeof id === 'string' && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id)
@@ -76,7 +78,8 @@ async function policyOptions() {
     evidenceListener: { tls: tls('policy'), host, port: 9444, origin: evidenceOrigin,
       producerGrants: [{ fingerprint: fingerprint('producer'), nodeId: scope.nodeId }] },
     authorizeScope: (node, _action, target) => node === scope.nodeId && owns(target),
-    canReserve: target => owns(target) && target.targetId === 'note' && target.ruleId === 'edit' && target.ruleVersion === 'v1',
+    ...(ownerMode ? { ruleFile, resolveTarget: id => id === 'note' ? path : undefined }
+      : { canReserve: target => owns(target) && target.targetId === 'note' && target.ruleId === 'edit' && target.ruleVersion === 'v1' }),
     onReady: ({ revoke }) => announce({ revoke: () => revoke(scope.personId) }),
   }
 }
@@ -89,35 +92,46 @@ async function reservationClient() {
 async function workerOptions() {
   const { LlmAdapter } = await import('@deepseek-ai/dsh-llm')
   class MockModel extends LlmAdapter {
-    used = false
+    steps = 0
     providerInfo() { return { id: 'mock', name: 'Mock' } }
     async resolveModel(provider, id) {
       return { provider, id, name: id, inputModalities: ['text'], context: { contextWindow: 100000 }, defaultMaxTokens: 1000 }
     }
     async *stream() {
-      if (this.used) { yield { type: 'finish', reason: { kind: 'stop' } }; return }
-      this.used = true
-      const name = 'worker_replace_file'
-      const id = 'fixture-call'
+      const step = this.steps++
+      if (step !== 0 && !(ownerMode && step === 2)) { yield { type: 'finish', reason: { kind: 'stop' } }; return }
+      if (step === 2) {
+        // Exercise the central reader while the create-only rule is still active.
+        const [created] = entries('outbox.json')
+        await assert.rejects(reservations.reserve({ ...created.scope, operation: 'modify',
+          dispatchId: 'fixture-central-modify', version: 'fixture-existing-version',
+        }), { code: 'reservation-refused' })
+      }
+      const name = ownerMode && step === 0 ? 'worker_create_file' : 'worker_replace_file'
+      const id = step === 0 ? 'fixture-call' : 'fixture-modify'
+      const content = step === 0 ? 'updated' : 'should not be written'
       yield { type: 'block-start', index: 0, blockType: 'tool-call', id, name }
-      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name, arguments: JSON.stringify({ content: 'updated' }) } }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name, arguments: JSON.stringify({ content }) } }
       yield { type: 'finish', reason: { kind: 'tool-use' } }
     }
   }
   mkdirSync(root, { mode: 0o700 })
-  writeFileSync(path, 'initial', { flag: 'wx', mode: 0o600 })
+  if (!ownerMode) writeFileSync(path, 'initial', { flag: 'wx', mode: 0o600 })
   const reservations = await reservationClient()
   const { createFileEvidenceTlsClient } = await load('file-evidence-tls')
   const { createFileSettlementDelivery } = await load('file-settlement-delivery')
   return {
     adapter: new MockModel(),
+    ...(ownerMode && { ruleFile }),
     config: { nodeId: scope.nodeId, provider: 'mock', model: 'model', host, port: 9445, origin: workerOrigin, initialize: true,
       receiptPath: state('receipts.json'), outboxFile: state('outbox.json'),
+      ...(ownerMode && { auditFile: state('audit.json') }),
       certPaths: { ca: config('ca.pem'), cert: config('worker-server.pem'), key: config('worker-server.key') },
       peerGrants: [{ fingerprint: fingerprint('controller'), personId: scope.personId, botId: scope.botId, actions: ['create', 'submit'] }],
     },
     fileTools: { root, path, workerOwned: true, isAuthorized: target => process.env.DSBOT_SMOKE_EMPLOYEE === '1'
       ? validEmployeeRequest(target.requestId) : target.requestId === requestId,
+      ...(ownerMode && { operations: ['create', 'modify'] }),
       permit: { nodeId: scope.nodeId, targetId: 'note', path, client: reservations },
       readRules: () => ({ version: 'v1', rules: [{ id: 'edit', personId: scope.personId, botId: scope.botId, roomId: null,
         directory: root, grant: 'write', effect: 'allow', purpose: 'Update the fixture note',
@@ -148,6 +162,18 @@ async function verifyWorker(phase) {
     const [proof] = outbox
     assert.equal(proof.scope.requestId, observedRequest)
     assert.ok(owns(proof.scope))
+    if (ownerMode) {
+      assert.equal(proof.scope.operation, 'create')
+      assert.equal(proof.scope.ruleVersion, '1')
+      const deniedRequest = process.argv[4]
+      assert.ok(validEmployeeRequest(deniedRequest) && deniedRequest !== observedRequest)
+      const { events } = JSON.parse(readFileSync(state('audit.json'), 'utf8'))
+      assert.deepEqual(events.map(({ type, requestId, operation, verdict }) => [type, requestId, operation, verdict]), [
+        ['file-authorization', observedRequest, 'create', 'allowed'],
+        ['file-effect', observedRequest, 'create', 'allowed'],
+        ['file-authorization', deniedRequest, 'modify', 'denied'],
+      ])
+    }
     const { createFileEvidenceTlsClient } = await load('file-evidence-tls')
     const ordinary = createFileEvidenceTlsClient({ origin: evidenceOrigin, ...tls('reservation-client') })
     await assert.rejects(ordinary(proof), { code: 'evidence-refused' })
