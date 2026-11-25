@@ -11,9 +11,11 @@ const policy = [
   "base-uri 'none'", "form-action 'none'", "frame-ancestors 'none'",
 ].join('; ')
 
-export async function loadEmployeeSite() {
+export async function loadEmployeeSite({ owner = false } = {}) {
+  const files = owner ? [...assets, ['/owner', 'owner.html', 'text/html; charset=utf-8'],
+    ['/owner.js', 'owner.js', 'text/javascript; charset=utf-8']] : assets
   // Resolve only packaged assets at startup. The request target never becomes a file path.
-  const site = new Map(await Promise.all(assets.map(async ([path, name, type]) => {
+  const site = new Map(await Promise.all(files.map(async ([path, name, type]) => {
     const body = await readFile(new URL('../../client/enterprise/' + name, import.meta.url))
     return [path, { body, headers: {
       'Content-Type': type,

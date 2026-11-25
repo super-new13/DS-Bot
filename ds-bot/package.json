@@ -36,6 +36,8 @@
     "src/host/",
     "src/client/enterprise/api.js",
     "src/client/enterprise/index.html",
+    "src/client/enterprise/owner.html",
+    "src/client/enterprise/owner.js",
     "src/client/enterprise/page.css",
     "src/client/enterprise/page.js",
     "src/shared/",

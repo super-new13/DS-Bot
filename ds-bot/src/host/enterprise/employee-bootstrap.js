@@ -29,9 +29,12 @@ const limitsKeys = ['maxActive', 'maxPerBot', 'maxPerNode', 'maxPending']
 const groupLimits = ['maxActive', 'maxPending', 'maxPendingPerRoom']
 
 function check(config) {
-  if (!exact(config, ['accountFile', 'https', 'workers', 'roster', 'limits'], ['initializeAccounts', 'groups'])) throw invalid('root')
+  if (!exact(config, ['accountFile', 'https', 'workers', 'roster', 'limits'], ['initializeAccounts', 'groups', 'owner'])) throw invalid('root')
   const { accountFile, initializeAccounts, https, workers, roster, limits } = config
   if (!absolute(accountFile) || (initializeAccounts !== undefined && typeof initializeAccounts !== 'boolean')) throw invalid('accounts')
+  if (config.owner !== undefined && (!exact(config.owner, ['tokenHash', 'transcriptDirectory'])
+      || typeof config.owner.tokenHash !== 'string' || !/^[a-f0-9]{64}$/.test(config.owner.tokenHash)
+      || !absolute(config.owner.transcriptDirectory))) throw invalid('owner settings')
   if (!exact(https, ['origin', 'host', 'port', 'certFile', 'keyFile']) || !origin(https.origin)
       || typeof https.host !== 'string' || !isIP(https.host) || !Number.isInteger(https.port) || https.port < 0 || https.port > 65535
       || !absolute(https.certFile) || !absolute(https.keyFile)) throw invalid('HTTPS listener')
@@ -119,7 +122,7 @@ export async function startEmployeeDeployment(configFile, { executeRoom } = {}) 
       }))
     },
   })
-  return startEmployeeRuntime({ accountFile, initializeAccounts, readConfig, workers, limits,
+  return startEmployeeRuntime({ accountFile, initializeAccounts, readConfig, workers, limits, owner: config.owner,
     https: { origin: https.origin, host: https.host, port: https.port, tls },
     readHistory: groupRuntime?.readHistory ?? (() => undefined), enqueueGroup: groupRuntime?.enqueue ?? (() => false) })
 }

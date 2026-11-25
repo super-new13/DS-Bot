@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DS Bot · Owner</title>
+  <link rel="stylesheet" href="/page.css">
+  <script type="module" src="/owner.js"></script>
+</head>
+<body>
+  <main>
+    <header><h1>DS Bot · Owner</h1><button id="clear" type="button">Clear credential and results</button></header>
+    <section class="card" aria-labelledby="transcript-title">
+      <h2 id="transcript-title">Private transcripts</h2>
+      <form id="owner-form" autocomplete="off">
+        <label>Owner token <input id="token" type="password" autocomplete="off" maxlength="43"></label>
+        <label>Employee ID <input id="person" maxlength="128" required></label>
+        <label>Bot ID <input id="bot" maxlength="128" required></label>
+        <button class="primary">View transcript</button>
+      </form>
+      <p id="status" role="status"></p>
+      <div id="messages" aria-label="Transcript"></div>
+      <button id="older" type="button" hidden>Older turns</button>
+    </section>
+  </main>
+</body>
+</html>

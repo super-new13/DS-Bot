@@ -10,9 +10,11 @@ const routes = new Map([
   ['/api/enterprise/private-chat/send', 'POST'],
   ['/api/enterprise/private-chat/cancel', 'POST'],
 ])
+const ownerPaths = new Set(['invite', 'revoke', 'transcript', 'audit'].map(operation => '/api/enterprise/owner/' + operation))
 const groupRoute = /^\/api\/enterprise\/group-chat\/[A-Za-z0-9_-]{1,128}\/(history|send)$/
 
 export function employeeRoute(path) {
+  if (ownerPaths.has(path)) return { method: 'POST', owner: true }
   const method = routes.get(path)
   if (method) return { method, group: false }
   if (path === '/api/enterprise/group-chat/rooms') return { method: 'GET', group: true }
@@ -69,9 +71,10 @@ async function writeResponse(res, output, signal) {
   await pipeline(Readable.fromWeb(output.body), res, { signal })
 }
 
-async function handle(req, res, { origin, authority, handler, employeeAsset, maxBodyBytes, bodyTimeoutMs }) {
+async function handle(req, res, { origin, authority, handler, employeeAsset, ownerAdmission, maxBodyBytes, bodyTimeoutMs }) {
   if (req.headersDistinct.host?.length !== 1 || req.headers.host?.toLowerCase() !== authority) return reject(res, 404)
-  const method = employeeRoute(req.url?.split('?', 1)[0])?.method
+  const route = employeeRoute(req.url?.split('?', 1)[0])
+  const method = route?.method
   if (!method) {
     const asset = employeeAsset?.(req.url)
     if (!asset) return reject(res, 404)
@@ -81,10 +84,21 @@ async function handle(req, res, { origin, authority, handler, employeeAsset, max
     return
   }
   if (req.method !== method) return reject(res, 405, { Allow: method })
+  const clientKey = req.socket.remoteAddress
+  let owner
+  if (route.owner) {
+    if (!ownerAdmission || req.url.includes('?')) return reject(res, 404)
+    const singular = name => req.headersDistinct[name]?.length === 1 ? req.headersDistinct[name][0] : undefined
+    const admission = ownerAdmission.admit({ authorization: singular('authorization'), requestOrigin: singular('origin'),
+      fetchSite: req.headersDistinct['sec-fetch-site']?.length > 1 ? 'cross-site' : singular('sec-fetch-site'), clientKey })
+    if (!admission.context) return reject(res, admission.status, admission.retryAfter ? { 'Retry-After': admission.retryAfter } : undefined)
+    owner = admission.context
+  }
   const headers = new Headers()
   for (const name of requestFields) {
     if (typeof req.headers[name] === 'string') headers.set(name, req.headers[name])
   }
+  if (route.owner) headers.set('authorization', req.headersDistinct.authorization[0])
   const declared = headers.get('content-length')
   if (declared !== null && !/^\d+$/.test(declared)) return reject(res, 400)
   if (Number(declared) > maxBodyBytes) return reject(res, 413)
@@ -99,7 +113,7 @@ async function handle(req, res, { origin, authority, handler, employeeAsset, max
 
   const input = new Request(origin + req.url, { method, headers, body, signal: abort.signal })
   // Direct TLS peers only. A reverse proxy would need its own authenticated client-address contract.
-  const output = await handler(input, { clientKey: req.socket.remoteAddress })
+  const output = await handler(input, { clientKey, owner })
   if (abort.signal.aborted) {
     await output.body?.cancel()
     return
@@ -108,7 +122,7 @@ async function handle(req, res, { origin, authority, handler, employeeAsset, max
 }
 
 // Returns the bound address and an idempotent close which aborts live connections.
-export async function startEnterpriseHttpsEntry({ tls, origin, handler, employeeAsset, host = '127.0.0.1', port = 0,
+export async function startEnterpriseHttpsEntry({ tls, origin, handler, employeeAsset, ownerAdmission, host = '127.0.0.1', port = 0,
   maxBodyBytes = 65536, bodyTimeoutMs = 5000, headersTimeoutMs = 10000, idleTimeoutMs = 60000,
   maxConnections = 128 } = {}) {
   const publicUrl = new URL(origin)
@@ -118,7 +132,7 @@ export async function startEnterpriseHttpsEntry({ tls, origin, handler, employee
     if (!Number.isSafeInteger(value) || value < 1 || value > 2 ** 31 - 1) throw new RangeError('Invalid HTTPS entry limit')
   }
   const sockets = new Set()
-  const options = { origin, authority: publicUrl.host, handler, employeeAsset, maxBodyBytes, bodyTimeoutMs }
+  const options = { origin, authority: publicUrl.host, handler, employeeAsset, ownerAdmission, maxBodyBytes, bodyTimeoutMs }
   const server = createServer({ ...tls, insecureHTTPParser: false, headersTimeout: headersTimeoutMs,
     requestTimeout: Math.min(2 ** 31 - 1, headersTimeoutMs + bodyTimeoutMs),
     connectionsCheckingInterval: Math.min(headersTimeoutMs, bodyTimeoutMs, 1000),

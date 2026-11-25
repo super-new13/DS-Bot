@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createHash, randomBytes } from 'node:crypto'
+import { mkdir, readdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { request } from 'node:https'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -57,13 +58,14 @@ async function fixture(t) {
     instances.push(instance)
     return instance
   }
-  async function send(instance, path, { json, cookie, method = json === undefined ? 'GET' : 'POST' } = {}) {
+  async function send(instance, path, { json, cookie, headers, method = json === undefined ? 'GET' : 'POST' } = {}) {
     const body = json === undefined ? undefined : JSON.stringify(json)
     const response = await new Promise((resolve, reject) => {
       const req = request({ host, port: instance.address.port, path, ca: cert, agent: false, method,
         signal: AbortSignal.timeout(4000), headers: { host, ...(cookie && { cookie }),
           ...(method === 'POST' && { origin }),
           ...(body !== undefined && { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) }),
+          ...headers,
         },
       }, resolve)
       req.on('error', reject)
@@ -73,7 +75,7 @@ async function fixture(t) {
     const text = (await Array.fromAsync(response.setEncoding('utf8'))).join('')
     return { status: response.statusCode, headers: response.headers, text }
   }
-  return { options, submissions, start, send }
+  return { dir, options, submissions, start, send }
 }
 
 test('runtime serves HTTPS login and private SSE and restores the login after restart', { timeout: 10000 }, async t => {
@@ -131,4 +133,51 @@ test('startup rejects missing or corrupt state, invalid roster, missing TLS and 
   await writeFile(options.accountFile, corrupt)
   await assert.rejects(start({ initializeAccounts: true }), /Invalid employee account store/)
   assert.equal(await readFile(options.accountFile, 'utf8'), corrupt)
+})
+
+test('standalone owner uses a bearer and can read private chat from the shared store', { timeout: 10000 }, async t => {
+  const { dir, start, send } = await fixture(t)
+  const token = randomBytes(32).toString('base64url')
+  const tokenHash = createHash('sha256').update(token).digest('hex')
+  const transcriptDirectory = join(dir, 'private-transcripts')
+  await mkdir(transcriptDirectory, { mode: 0o700 })
+  const runtime = await start({ initializeAccounts: true, owner: { tokenHash, transcriptDirectory } })
+  const ownerPath = '/api/enterprise/owner/'
+  const headers = { authorization: 'Bearer ' + token }
+  const person = { personId: 'alice' }
+  const scope = { ...person, botId: 'helper' }
+  const call = (operation, json, overrides) => send(runtime, ownerPath + operation, { json, headers, ...overrides })
+  const page = await send(runtime, '/owner')
+  assert.equal(page.status, 200)
+  assert.match(page.headers['content-security-policy'], /frame-ancestors 'none'/)
+  assert.match(page.text, /src="\/owner.js"/)
+  assert.equal((await send(runtime, '/owner.js')).status, 200)
+  assert.ok(!(await send(runtime, '/')).text.includes('href="/owner"'))
+  const noOwner = await call('transcript', scope, { headers: {} })
+  assert.equal(noOwner.status, 401)
+  assert.equal(noOwner.headers['cache-control'], 'no-store')
+  assert.equal((await call('invite', person, { headers: { ...headers, origin: 'https://foreign.invalid' } })).status, 403)
+  assert.equal((await call('invite', undefined, { method: 'GET' })).status, 405)
+  assert.equal((await call('unknown', person)).status, 404)
+  const audit = await call('audit', {})
+  assert.equal(audit.status, 503)
+  assert.deepEqual(JSON.parse(audit.text), { error: 'Audit view not configured' })
+  const invitation = await call('invite', person)
+  assert.equal(invitation.status, 201)
+  assert.ok(!invitation.text.includes(token))
+  assert.equal((await send(runtime, auth + 'redeem', { json: { token: JSON.parse(invitation.text).token, password } })).status, 204)
+  const login = await send(runtime, auth + 'login', { json: { ...person, password } })
+  assert.equal(login.status, 204)
+  const cookie = login.headers['set-cookie'][0].split(';', 1)[0]
+  assert.equal((await call('transcript', scope, { headers: {}, cookie })).status, 401)
+  const chat = await send(runtime, privateSend, { cookie, json: { botId: scope.botId, text: 'fixture prompt' } })
+  assert.equal(chat.status, 200)
+  assert.match(chat.text, /Mock fixture prompt/)
+  const result = await call('transcript', scope)
+  assert.equal(result.status, 200)
+  const transcript = JSON.parse(result.text)
+  assert.equal(transcript.turns[0]?.text, 'fixture prompt')
+  assert.ok((await readdir(transcriptDirectory)).some(name => name.startsWith('owner-read-')))
+  assert.equal((await call('revoke', person)).status, 204)
+  assert.equal((await send(runtime, auth + 'session', { cookie })).status, 401)
 })

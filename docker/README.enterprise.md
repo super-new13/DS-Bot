@@ -266,3 +266,24 @@ To start both roles in a disposable project with a local engine and provisioned
 fixture directories, explicitly select the two services:
 
     docker compose --env-file /dev/null -f compose.enterprise.yml -p dsbot-node-smoke up --build file-policy worker
+
+### Standalone owner console
+
+Set the optional JSON settings below to enable the owner console. Create the
+transcript directory inside the persistent employee volume before startup.
+Use mode 0700 and make UID 1000 the owner. Keep the directory private. It
+holds private chat turns and the audit records for owner transcript reads.
+
+    "owner": {
+      "tokenHash": "<64 lowercase hexadecimal characters>",
+      "transcriptDirectory": "/home/node/private-transcripts"
+    }
+
+Generate the owner token from 32 cryptographically random bytes, encoded as
+unpadded base64url. Put the SHA-256 digest of that encoded string in
+`owner.tokenHash`. Keep the original token in a secure credential manager.
+Open `/owner` on the employee HTTPS origin and enter the token there. The
+page keeps the token in memory and clears it when the page is left or the
+clear button is used. The owner API requires the canonical HTTPS Origin and
+`Authorization: Bearer` credential. The worker audit view returns 503 until
+an adapter to its existing writer is configured.
