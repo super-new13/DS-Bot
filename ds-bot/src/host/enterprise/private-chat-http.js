@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { createEmployeeAuthHandler } from './auth-http.js'
 import { canAccessEmployeeBot } from './authorization.js'
 import { createDispatchQueue } from './dispatch-queue.js'
+import { maxTranscriptReplyBytes } from './transcript-store.js'
 
 const prefix = '/api/enterprise/private-chat/'
 const headers = { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer' }
@@ -110,12 +111,22 @@ function streamReply(isAuthorized) {
 
 // The host supplies fresh authoritative roster state and resolves each Bot to its
 // configured worker. Both lookups are synchronous and use server-owned state.
-export function createEmployeePrivateChatHandler({ accounts, origin, readRoster, resolveBot, limits, maxBodyBytes = 16384 }) {
+export function createEmployeePrivateChatHandler({ accounts, origin, readRoster, resolveBot, limits, transcriptStore, maxBodyBytes = 16384 }) {
   if (typeof readRoster !== 'function' || typeof resolveBot !== 'function' || !Number.isSafeInteger(maxBodyBytes)
       || maxBodyBytes < 1 || maxBodyBytes > 65536) throw new TypeError('Invalid private chat configuration')
+  if (transcriptStore !== undefined && ['begin', 'finish', 'markIncomplete'].some(key => typeof transcriptStore?.[key] !== 'function')) {
+    throw new TypeError('Invalid private transcript store')
+  }
   const auth = createEmployeeAuthHandler({ accounts, origin })
   const sessions = new Map()
   const requests = new Map()
+
+  async function transcriptFailed(scope) {
+    console.warn('Could not record a private transcript turn')
+    try { await transcriptStore.markIncomplete(scope) }
+    catch { console.warn('Could not persist a private transcript gap') }
+    return false
+  }
 
   function route(personId, botId) {
     if (!canAccessEmployeeBot(readRoster(), personId, botId)) return undefined
@@ -149,11 +160,23 @@ export function createEmployeePrivateChatHandler({ accounts, origin, readRoster,
       if (session.worker !== worker || session.nodeId !== nodeId || stream.closed || !await authorized(entry)) throw denied()
       if (stream.closed) throw denied()
       entry.activeScope = session.scope
+      const transcript = { personId, botId, requestId }
+      const replies = []
+      let replyBytes = 2
+      let incomplete = false
+      let outcome = 'unknown'
+      const started = transcriptStore && Promise.resolve().then(() => transcriptStore.begin({ ...transcript, text, at: Date.now() }))
+        .then(() => true, () => transcriptFailed(transcript))
       try {
         const result = await worker.submit({ ...session.scope, requestId, text }, event => {
           if (event.sessionId !== session.scope.sessionId || event.requestId !== requestId) return
           if ((event.type === 'delta' || event.type === 'reply') && typeof event.text === 'string') {
             stream.push({ type: event.type, requestId, text: event.text })
+            if (transcriptStore && event.type === 'reply' && event.text && !incomplete) {
+              replyBytes += Buffer.byteLength(JSON.stringify(event.text)) + (replies.length ? 1 : 0)
+              if (replyBytes + 1 > maxTranscriptReplyBytes) incomplete = true
+              else replies.push(event.text)
+            }
           }
         })
         if (result?.requestId !== requestId || result.sessionId !== session.scope.sessionId
@@ -164,9 +187,12 @@ export function createEmployeePrivateChatHandler({ accounts, origin, readRoster,
           stream.push({ type: 'error', requestId, code: unknownOutcome })
           return
         }
+        outcome = result.status
         stream.push({ type: 'done', requestId, status: result.status })
       } finally {
         entry.activeScope = undefined
+        if (started) void started.then(recorded => recorded && transcriptStore.finish({ ...transcript, replies, status: outcome, incomplete }))
+          .catch(() => transcriptFailed(transcript))
       }
     },
   })
