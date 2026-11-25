@@ -93,36 +93,45 @@ export function registerEmployeeAdminRoute(ctx, { accounts, readRoster, auditSto
   }), 'ds-bot: employee administration route')
 }
 
-export function createStandaloneOwnerHandler({ accounts, readRoster, isOwner, transcriptStore, ruleStore }) {
+export function createStandaloneOwnerHandler({ accounts, readRoster, isOwner, transcriptStore, ruleStore, auditStore }) {
   const capabilities = new WeakMap()
-  const service = createEmployeeAdminService({ accounts, readRoster, transcriptStore, ruleStore,
+  const service = createEmployeeAdminService({ accounts, readRoster, transcriptStore, ruleStore, auditStore,
     isOwner: context => !context?.signal.aborted && isOwner(capabilities.get(context)) })
 
   return async (request, admitted) => {
     if (!isOwner(admitted)) return reply(401, { error: 'Owner credential required' })
     const operation = new URL(request.url).pathname.split('/').at(-1)
     if (request.method !== 'POST' || !(operations.has(operation) || operation === 'rule')) return reply(404, { error: 'Not found' })
-    if (operation === 'audit') return reply(503, { error: 'Audit view not configured' })
     const type = request.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase()
     if (type !== 'application/json') return reply(415, { error: 'Expected JSON' })
     let body
     try { body = await request.json() } catch { return reply(400, { error: 'Invalid request' }) }
-    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.hasOwn(body, 'operation')) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
       return reply(400, { error: 'Invalid request' })
     }
+    const audit = operation === 'audit'
+    if (audit ? Object.keys(body).length !== 2 || body.operation !== 'audit' || !Object.hasOwn(body, 'query')
+      : Object.hasOwn(body, 'operation')) return reply(400, { error: 'Invalid request' })
     const filter = operation === 'transcript' ? parseTranscriptFilter(body) : undefined
-    if (operation !== 'rule' && (operation === 'transcript' ? !filter : Object.keys(body).length !== 1 || typeof body.personId !== 'string')) {
+    if (!audit && operation !== 'rule' && (operation === 'transcript' ? !filter : Object.keys(body).length !== 1 || typeof body.personId !== 'string')) {
       return reply(400, { error: 'Invalid request' })
     }
     const context = Object.freeze({ requestId: randomUUID(), at: Date.now(), signal: request.signal })
     capabilities.set(context, admitted)
     try {
+      if (audit) {
+        if (!service.audit) return reply(503, { error: 'Audit records unavailable' })
+        return reply(200, await service.audit(context, body.query))
+      }
       if (operation === 'rule') return reply(body.action === 'create' ? 201 : 200, await service.rule(context, body))
       const result = await service[operation](context, filter ?? body.personId)
       if (operation === 'transcript') return reply(200, result)
       if (!result) return reply(409, { error: 'Account state does not allow this operation' })
       return operation === 'invite' ? reply(201, result) : new Response(null, { status: 204, headers })
     } catch (error) {
+      if (audit) return error?.code === 'invalid-audit-query'
+        ? reply(400, { error: 'Invalid audit query' })
+        : reply(503, { error: 'Audit records unavailable' })
       if (error?.code === 'invalid-rule') return reply(400, { error: 'Invalid rule update' })
       if (error?.code === 'rule-conflict') return reply(409, { error: 'Rule state does not allow this change' })
       if (error?.code === 'rule-unavailable') return reply(503, { error: 'Rule store unavailable' })
