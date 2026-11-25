@@ -180,7 +180,8 @@ if "employee-pilot" in m["services"]:
     assert set(entry["networks"]) == {"employee-edge", "file-operations"}
     for role in ("file-policy", "worker", "employee-pilot"):
         mount, = [v for v in m["services"][role]["volumes"] if v["target"] == "/run/dsbot-smoke-rules"]
-        assert mount["read_only"] == (role != "employee-pilot")
+        # Compose omits read_only for a writable mount, and may drop bind options.
+        assert mount.get("read_only", False) == (role != "employee-pilot")
     print("Employee HTTPS is the only published port and binds to loopback")
 else:
     print("Rendered roles use a private network and publish zero ports")' "${employee_port:-}"
