@@ -6,6 +6,7 @@ import re
 import secrets
 import ssl
 import sys
+import time
 
 
 def check(condition, message):
@@ -64,7 +65,9 @@ def run(port, owner_token):
     call(owner + 'audit', 503, {}, bearer=owner_token)
     rule = {**scope, 'id': 'edit', 'roomId': None, 'directory': '/home/node/smoke-state/owned',
             'operation': 'create', 'effect': 'allow', 'purpose': 'Create the fixture note'}
-    call(owner + 'rule', 201, {'action': 'create', 'rule': rule}, bearer=owner_token)
+    # The owner admission allows 8 owner requests per minute per client address;
+    # the calls above already used 6 (invite 401, invite 201, transcript 401, transcript 200, audit 503, page 200).
+    time.sleep(61)
     prompt = {'botId': 'helper', 'text': 'Create the fixture note'}
     call(send, 401, prompt)
     call(send, 403, {**prompt, 'botId': 'foreign'}, cookie)
