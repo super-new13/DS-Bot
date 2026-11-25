@@ -1,3 +1,4 @@
+import { createWorkerAuditReader } from './worker-audit.js'
 import { X509Certificate } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { isIP } from 'node:net'
@@ -126,6 +127,7 @@ export async function startEmployeeDeployment(configFile, { executeRoom } = {}) 
     },
   })
   return startEmployeeRuntime({ accountFile, initializeAccounts, readConfig, workers, limits, owner: config.owner,
+    auditStore: config.owner ? createWorkerAuditReader({ workers: clients }) : undefined,
     https: { origin: https.origin, host: https.host, port: https.port, tls },
     readHistory: groupRuntime?.readHistory ?? (() => undefined), enqueueGroup: groupRuntime?.enqueue ?? (() => false) })
 }

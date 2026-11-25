@@ -62,11 +62,10 @@ def run(port, owner_token):
     call(owner + 'transcript', 401, scope, cookie)
     _, data = call(owner + 'transcript', 200, scope, bearer=owner_token)
     check(json.loads(data)['turns'] == [], 'Expected empty private transcript')
-    call(owner + 'audit', 503, {}, bearer=owner_token)
     rule = {**scope, 'id': 'edit', 'roomId': None, 'directory': '/home/node/smoke-state/owned',
             'operation': 'create', 'effect': 'allow', 'purpose': 'Create the fixture note'}
     # The owner admission allows 8 owner requests per minute per client address;
-    # the calls above already used 6 (invite 401, invite 201, transcript 401, transcript 200, audit 503, page 200).
+    # Reset the admission window before the rule and audit calls.
     time.sleep(61)
     call(owner + 'rule', 201, {'action': 'create', 'rule': rule}, bearer=owner_token)
     prompt = {'botId': 'helper', 'text': 'Create the fixture note'}
@@ -78,6 +77,14 @@ def run(port, owner_token):
     _, data = call(owner + 'transcript', 200, scope, bearer=owner_token)
     turns = json.loads(data)['turns']
     check({turn['requestId'] for turn in turns} == {created, denied}, 'Transcript did not contain the scoped turns')
+    _, data = call(owner + 'audit', 200, {'operation': 'audit', 'query': scope}, bearer=owner_token)
+    audit = json.loads(data)
+    check(audit['nextOffset'] is None, 'Expected one page of fixture audit records')
+    check([(event['type'], event['requestId'], event['operation'], event['verdict']) for event in audit['events']] == [
+        ('file-authorization', created, 'create', 'allowed'),
+        ('file-effect', created, 'create', 'allowed'),
+        ('file-authorization', denied, 'modify', 'denied'),
+    ], 'Unexpected worker audit events')
     call(owner + 'rule', 200, {'action': 'edit', 'rule': {**rule, 'purpose': 'Updated fixture purpose'}}, bearer=owner_token)
     call(owner + 'rule', 200, {'action': 'retire', 'rule': {'id': rule['id']}}, bearer=owner_token)
     call(owner + 'revoke', 204, person, bearer=owner_token)

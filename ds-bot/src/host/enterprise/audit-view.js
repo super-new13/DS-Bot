@@ -6,7 +6,7 @@ export function createOwnerAuditView({ auditStore, isOwner }) {
     const authorized = () => context != null && isOwner(context) === true
     const refused = () => Object.assign(new Error('Audit read refused'), { code: 'not-authorized' })
     if (!authorized()) throw refused()
-    const result = await auditStore.readAudit(query, randomUUID(), authorized)
+    const result = await auditStore.readAudit(query, context.requestId ?? randomUUID(), authorized, { signal: context.signal })
     if (!authorized()) throw refused()
     return result
   }

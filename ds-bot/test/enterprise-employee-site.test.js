@@ -1,3 +1,4 @@
+import { createWorkerAuditReader } from '../src/host/enterprise/worker-audit.js'
 import assert from 'node:assert/strict'
 import { createHash, randomBytes } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
@@ -13,7 +14,7 @@ const origin = 'https://' + host
 const auth = '/api/enterprise/auth/'
 const send = '/api/enterprise/private-chat/send'
 
-async function fixture(t, { ownerRules = false } = {}) {
+async function fixture(t, { ownerRules = false, auditStore } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'ds-bot-employee-site-'))
   let runtime
   t.after(async () => {
@@ -33,6 +34,7 @@ async function fixture(t, { ownerRules = false } = {}) {
     accountFile: join(dir, 'accounts.json'), initializeAccounts: true,
     ...(ownerRules && { owner: { tokenHash: createHash('sha256').update(token).digest('hex'),
       transcriptDirectory, ruleFile, initializeRules: true } }),
+    auditStore,
     https: { origin, tls: { key: await readFile(keyPath), cert } },
     readConfig: () => ({ people: { employee: { id: 'employee', name: 'Employee', botIds: ['helper'] } },
       bots: { helper: { id: 'helper', nodeId: 'mock' } }, rooms: {} }),
@@ -159,4 +161,40 @@ test('employee HTTPS protects and audits owner rule changes', { timeout: 10000 }
   assert.deepEqual(changes.map(row => [row.version, row.action, row.rule.id, row.ownerRequestId]),
     [created, edited, retired].map(({ text }, i) => [i + 1, ['create', 'edit', 'retire'][i], rule.id, JSON.parse(text).ownerRequestId]))
   assert.ok(changes.every(({ at }) => at > 0))
+})
+
+test('owner HTTPS reads audit pages and rejects ambiguous, invalid and refused worker queries', async t => {
+  const calls = []
+  const page = { events: [{ type: 'file-authorization', personId: 'employee', operation: 'read', verdict: 'allowed' }], nextOffset: 1 }
+  const client = { readAudit: async (scope, input, options) => {
+    calls.push({ scope, input, options })
+    if (scope.nodeId === 'refused') throw Object.assign(new Error('private fixture detail'), { code: 'worker-refused' })
+    return page
+  } }
+  const workers = new Map([['mock', client], ['refused', client]])
+  const { call, token } = await fixture(t, { ownerRules: true, auditStore: createWorkerAuditReader({ workers }) })
+  const route = '/api/enterprise/owner/audit'
+  const headers = { authorization: 'Bearer ' + token }
+  const load = (query, extra = {}) => call(route, { json: { operation: 'audit', query }, headers, ...extra })
+  assert.equal((await load({}, { headers: { cookie: '__Host-dsbot-employee=fixture' } })).status, 401)
+  const success = await load({ nodeId: 'mock', limit: 1 })
+  assert.equal(success.status, 200)
+  assert.equal(success.headers['cache-control'], 'no-store')
+  assert.deepEqual(JSON.parse(success.text), page)
+  for (const query of [{}, { nodeId: 'unknown' }, { nodeId: '../mock' }, { nodeId: 'mock', limit: 101 }]) {
+    assert.equal((await load(query)).status, 400)
+  }
+  const denial = await load({ nodeId: 'refused' })
+  assert.equal(denial.status, 503)
+  assert.deepEqual(JSON.parse(denial.text), { error: 'Audit records unavailable' })
+  assert.deepEqual(calls.map(({ scope, input }) => [scope, input.query]), [[{ nodeId: 'mock' }, { limit: 1 }], [{ nodeId: 'refused' }, {}]])
+  assert.ok(calls.every(({ input, options }) => typeof input.ownerRequestId === 'string' && options.signal instanceof AbortSignal))
+})
+
+test('owner HTTPS returns unavailable with no configured audit workers', async t => {
+  const { call, token } = await fixture(t, { ownerRules: true, auditStore: createWorkerAuditReader({ workers: new Map() }) })
+  const response = await call('/api/enterprise/owner/audit', {
+    json: { operation: 'audit', query: {} }, headers: { authorization: 'Bearer ' + token },
+  })
+  assert.equal(response.status, 503)
 })

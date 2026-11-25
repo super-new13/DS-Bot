@@ -14,7 +14,7 @@ import { createEnterpriseRuntimeRoster } from './runtime-roster.js'
 // The host owns the private directory and worker registry. Use one runtime per account
 // file and share its account service with trusted provisioning callers.
 export async function startEmployeeRuntime({ accountFile, initializeAccounts = false, readConfig, workers,
-  readHistory, enqueueGroup, limits, https, owner } = {}) {
+  readHistory, enqueueGroup, limits, https, owner, auditStore } = {}) {
   if (typeof accountFile !== 'string' || !isAbsolute(accountFile) || typeof initializeAccounts !== 'boolean') {
     throw new TypeError('Expected an absolute employee account file path and a boolean initialization flag')
   }
@@ -41,7 +41,7 @@ export async function startEmployeeRuntime({ accountFile, initializeAccounts = f
   const store = await openEmployeeAccountStore(accountFile, { initialize: initializeAccounts })
   const accounts = createEmployeeAccounts(store)
   const handleOwner = ownerAdmission && createStandaloneOwnerHandler({ accounts, readRoster: roster.readRoster,
-    isOwner: ownerAdmission.isOwner, transcriptStore, ruleStore })
+    isOwner: ownerAdmission.isOwner, transcriptStore, ruleStore, auditStore })
   const handler = createEmployeeServiceHandler({ origin: options.origin, accounts, ...roster, limits, readHistory, enqueueGroup, transcriptStore, handleOwner })
   const entry = await startEnterpriseHttpsEntry({ ...options, handler, employeeAsset, ownerAdmission })
   return { address: entry.address, close: entry.close, accounts }

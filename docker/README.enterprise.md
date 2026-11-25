@@ -285,8 +285,11 @@ unpadded base64url. Put the SHA-256 digest of that encoded string in
 Open `/owner` on the employee HTTPS origin and enter the token there. The
 page keeps the token in memory and clears it when the page is left or the
 clear button is used. The owner API requires the canonical HTTPS Origin and
-`Authorization: Bearer` credential. The worker audit view returns 503 until
-an adapter to its existing writer is configured.
+`Authorization: Bearer` credential. Choose **View audit records** to read the worker's redacted file authorization
+and effect records. Enter the node ID when several workers are configured.
+The worker must provision an audit file and grant the employee service's mTLS
+peer fingerprint the `audit` action. A peer grant can omit `personId` and `botId`
+only when all its actions are `audit`. The selected worker records each read.
 
 ### Owner console smoke
 
@@ -298,7 +301,7 @@ Use --employee --config-only to verify the generated fixture and rule mounts
 locally without Docker. The full run also validates the merged Compose model.
 Its HTTPS probe runs inside the employee container and uses the public HTTPS
 origin for the Host and Origin headers. The fixture asserts owner admission,
-invite and revoke, transcript reads, the unavailable audit route, rule changes,
+invite and revoke, transcript reads, worker audit records, rule changes,
 and a create-only grant with an actual creation and denied modification.
 
 The employee configuration uses owner.tokenHash for the lowercase SHA-256

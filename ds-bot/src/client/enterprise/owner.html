@@ -47,6 +47,25 @@
       </form>
       <p id="rule-status" role="status"></p>
     </section>
+    <section class="card" aria-labelledby="audit-title">
+      <h2 id="audit-title">File audit records</h2>
+      <form id="audit-form" autocomplete="off">
+        <label>Worker node ID <input name="nodeId" maxlength="128" placeholder="Optional for one worker"></label>
+        <label>Employee ID <input name="personId" maxlength="256"></label>
+        <label>Bot ID <input name="botId" maxlength="256"></label>
+        <label>Operation <select name="operation"><option value="">All</option><option value="create">Create</option><option value="read">Read</option><option value="modify">Modify</option></select></label>
+        <label>Verdict <select name="verdict"><option value="">All</option><option value="allowed">Allowed</option><option value="denied">Denied</option></select></label>
+        <button class="primary">View audit records</button>
+      </form>
+      <p id="audit-status" role="status"></p>
+      <div id="audit-results" hidden>
+        <table aria-label="File audit records">
+          <thead><tr><th scope="col">Type</th><th scope="col">Employee</th><th scope="col">Bot</th><th scope="col">Operation</th><th scope="col">Rule</th><th scope="col">Version</th><th scope="col">Verdict</th><th scope="col">Outcome</th></tr></thead>
+          <tbody id="audit-rows"></tbody>
+        </table>
+      </div>
+      <button id="audit-next" type="button" hidden>Next page</button>
+    </section>
   </main>
 </body>
 </html>

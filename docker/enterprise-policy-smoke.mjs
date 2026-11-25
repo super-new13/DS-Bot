@@ -127,7 +127,8 @@ async function workerOptions() {
       receiptPath: state('receipts.json'), outboxFile: state('outbox.json'),
       ...(ownerMode && { auditFile: state('audit.json') }),
       certPaths: { ca: config('ca.pem'), cert: config('worker-server.pem'), key: config('worker-server.key') },
-      peerGrants: [{ fingerprint: fingerprint('controller'), personId: scope.personId, botId: scope.botId, actions: ['create', 'submit'] }],
+      peerGrants: [{ fingerprint: fingerprint('controller'), personId: scope.personId, botId: scope.botId, actions: ['create', 'submit'] },
+        ...(ownerMode ? [{ fingerprint: fingerprint('controller'), actions: ['audit'] }] : [])],
     },
     fileTools: { root, path, workerOwned: true, isAuthorized: target => process.env.DSBOT_SMOKE_EMPLOYEE === '1'
       ? validEmployeeRequest(target.requestId) : target.requestId === requestId,
@@ -168,7 +169,7 @@ async function verifyWorker(phase) {
       const deniedRequest = process.argv[4]
       assert.ok(validEmployeeRequest(deniedRequest) && deniedRequest !== observedRequest)
       const { events } = JSON.parse(readFileSync(state('audit.json'), 'utf8'))
-      assert.deepEqual(events.map(({ type, requestId, operation, verdict }) => [type, requestId, operation, verdict]), [
+      assert.deepEqual(events.filter(event => event.type !== 'audit-view').map(({ type, requestId, operation, verdict }) => [type, requestId, operation, verdict]), [
         ['file-authorization', observedRequest, 'create', 'allowed'],
         ['file-effect', observedRequest, 'create', 'allowed'],
         ['file-authorization', deniedRequest, 'modify', 'denied'],

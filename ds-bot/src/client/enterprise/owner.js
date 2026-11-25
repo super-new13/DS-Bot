@@ -12,11 +12,26 @@ let token = ''
 let filter
 let before
 let job
+const auditForm = field('audit-form')
+const auditStatus = field('audit-status')
+const auditResults = field('audit-results')
+const auditRows = field('audit-rows')
+const auditNext = field('audit-next')
+const auditColumns = ['type', 'personId', 'botId', 'operation', 'ruleId', 'ruleVersion', 'verdict', 'outcome']
+let auditJob
+let auditQuery
+let auditOffset
 let ruleJob
 
 function clear() {
   job?.abort()
   ruleJob?.abort()
+  auditJob?.abort()
+  auditQuery = auditOffset = undefined
+  auditForm.reset()
+  auditRows.replaceChildren()
+  auditResults.hidden = auditNext.hidden = true
+  auditStatus.textContent = ''
   ruleJob = undefined
   tokenInput.value = ''
   token = ''
@@ -145,4 +160,62 @@ ruleForm.addEventListener('submit', async event => {
       ruleSave.disabled = false
     }
   }
+})
+
+async function loadAudit(offset = 0) {
+  auditJob?.abort()
+  const request = new AbortController()
+  auditJob = request
+  const credentialValue = token
+  auditResults.hidden = auditNext.hidden = true
+  auditRows.replaceChildren()
+  auditStatus.textContent = 'Loading audit records…'
+  try {
+    const response = await fetch('/api/enterprise/owner/audit', {
+      method: 'POST', credentials: 'omit', mode: 'same-origin', redirect: 'error', cache: 'no-store', signal: request.signal,
+      headers: { Authorization: 'Bearer ' + credentialValue, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ operation: 'audit', query: { ...auditQuery, offset } }),
+    })
+    if (request.signal.aborted) return
+    if (response.status === 401 && token === credentialValue) token = ''
+    if (!response.ok) {
+      auditStatus.textContent = ({ 400: 'Check the filters and worker node ID.', 401: 'Enter a valid owner token.',
+        429: 'Too many owner requests. Wait and try again.', 503: 'Audit records are unavailable.' })[response.status]
+        ?? 'Could not read audit records.'
+      return
+    }
+    const { events, nextOffset } = await response.json()
+    if (request.signal.aborted) return
+    if (!Array.isArray(events) || (nextOffset !== null && (!Number.isSafeInteger(nextOffset) || nextOffset <= offset))) {
+      throw new Error('Invalid audit page')
+    }
+    const rows = document.createDocumentFragment()
+    for (const event of events) {
+      const row = document.createElement('tr')
+      for (const key of auditColumns) {
+        const cell = document.createElement('td')
+        cell.textContent = event[key] ?? '—'
+        row.append(cell)
+      }
+      rows.append(row)
+    }
+    auditRows.append(rows)
+    auditOffset = nextOffset
+    auditNext.hidden = nextOffset === null
+    auditResults.hidden = events.length === 0
+    auditStatus.textContent = events.length ? '' : 'No audit records match these filters.'
+  } catch {
+    if (!request.signal.aborted) auditStatus.textContent = 'Could not read audit records.'
+  }
+}
+
+auditForm.addEventListener('submit', event => {
+  event.preventDefault()
+  if (!credential(auditStatus)) return
+  const values = new FormData(auditForm)
+  auditQuery = Object.fromEntries([...values].map(([key, value]) => [key, value.trim()]).filter(([, value]) => value))
+  void loadAudit()
+})
+auditNext.addEventListener('click', () => {
+  if (Number.isSafeInteger(auditOffset) && credential(auditStatus)) void loadAudit(auditOffset)
 })
