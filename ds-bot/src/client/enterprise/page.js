@@ -357,7 +357,8 @@ roomCompose.addEventListener('submit', async event => {
   }
   await loadRooms({ clear: failure?.status === 403 })
   if (person && picker.value === selected && !roomCompose.hidden && failure) {
-    feedback('room-status', 'Could not confirm the send. Check the room before trying again.', true)
+    feedback('room-status', failure.code === 'room-round-in-progress'
+      ? '进行中的轮次暂不接收新消息' : 'Could not confirm the send. Check the room before trying again.', true)
   }
 })
 

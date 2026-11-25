@@ -11,15 +11,18 @@ const stateError = (code, message) => Object.assign(new Error(message), { code }
 const invalid = () => stateError('invalid-group-transcript', 'Invalid room transcript')
 
 function batchOf(batch, roomId) {
-  if (!exact(batch, 'requestId', 'rows') || !id(batch.requestId) || !Array.isArray(batch.rows)
-      || batch.rows.length < 1 || batch.rows.length > 2) throw invalid()
+  const reply = Object.hasOwn(batch ?? {}, 'replyId')
+  if (!exact(batch, 'requestId', 'rows', ...(reply ? ['replyId'] : [])) || !id(batch.requestId) || !Array.isArray(batch.rows)
+      || batch.rows.length < 1 || batch.rows.length > (reply ? 1 : 2) || (reply && !id(batch.replyId))) throw invalid()
   const rows = Array.from(batch.rows, (row, index) => {
     if (!exact(row, 'roomId', 'kind', 'text', 'by', 'name') || row.roomId !== roomId
-        || row.kind !== (index === 0 ? 'user' : 'bot') || !id(row.by) || !text(row.name) || !text(row.text)) throw invalid()
+        || row.kind !== (index === 0 && !reply ? 'user' : 'bot') || (reply && row.by !== batch.replyId) || !id(row.by) || !text(row.name) || !text(row.text)) throw invalid()
     return { roomId, kind: row.kind, text: row.text, by: row.by, name: row.name }
   })
-  return { requestId: batch.requestId, rows }
+  return { requestId: batch.requestId, ...(reply && { replyId: batch.replyId }), rows }
 }
+
+const batchKey = batch => JSON.stringify([batch.requestId, batch.replyId ?? null])
 
 function decode(bytes, roomId) {
   let snapshot
@@ -28,10 +31,13 @@ function decode(bytes, roomId) {
   if (!exact(snapshot, 'version', 'roomId', 'batches') || snapshot.version !== 1 || snapshot.roomId !== roomId
       || !Array.isArray(snapshot.batches)) throw invalid()
   const seen = new Set()
+  const opening = new Set()
   const batches = snapshot.batches.map(value => {
     const batch = batchOf(value, roomId)
-    if (seen.has(batch.requestId)) throw invalid()
-    seen.add(batch.requestId)
+    const key = batchKey(batch)
+    if (seen.has(key) || (batch.replyId && !opening.has(batch.requestId))) throw invalid()
+    seen.add(key)
+    if (!batch.replyId && batch.rows.length === 1) opening.add(batch.requestId)
     return batch
   })
   return { version: 1, roomId, batches }
@@ -107,7 +113,10 @@ export async function openEmployeeGroupStore(path, { maxRoomBytes = 8 * 1024 * 1
     const batch = batchOf(input, roomId)
     return enqueue(async () => {
       const snapshot = await load(roomId)
-      const previous = snapshot.batches.find(value => value.requestId === batch.requestId)
+      const previous = snapshot.batches.find(value => batchKey(value) === batchKey(batch))
+      if (batch.replyId && !snapshot.batches.some(value => value.requestId === batch.requestId && !value.replyId && value.rows.length === 1)) {
+        throw invalid()
+      }
       if (previous) {
         if (JSON.stringify(previous) !== JSON.stringify(batch)) throw stateError('group-request-conflict', 'Room request already committed')
         return { appended: false }

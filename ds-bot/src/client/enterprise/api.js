@@ -206,7 +206,12 @@ export function createEmployeeApi({ fetch: fetchRequest = (...args) => globalThi
       return history
     },
     async sendGroup(roomId, text, { signal } = {}) {
-      const result = await json(expect(await post(groupPath(roomId, 'send'), { text }, signal), 202))
+      const response = await post(groupPath(roomId, 'send'), { text }, signal)
+      if (response.status === 409) {
+        const failure = await json(response).catch(() => undefined)
+        if (failure?.error === 'room-round-in-progress') throw new EnterpriseApiError(failure.error, { status: 409 })
+      }
+      const result = await json(expect(response, 202))
       if (!validId(result?.requestId)) throw new EnterpriseApiError('invalid-response')
       return { requestId: result.requestId }
     },

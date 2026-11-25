@@ -116,7 +116,7 @@ export function createEmployeeGroupChatHandler({ origin, accounts, readRoster, r
         if (used || typeof execute !== 'function') return false
         used = true
         if (!await decision.promise || !await access.canExecuteMessage(message, roomId)) return false
-        await execute(message)
+        await execute(message, () => access.canExecuteMessage(message, roomId))
         return true
       }
       try {
@@ -127,6 +127,7 @@ export function createEmployeeGroupChatHandler({ origin, accounts, readRoster, r
       } catch (cause) {
         decision.resolve(false)
         if (cause?.code === 'not-authorized') return refused()
+        if (cause?.code === 'room-round-in-progress') return error(409, cause.code)
         throw cause
       }
       decision.resolve(true)

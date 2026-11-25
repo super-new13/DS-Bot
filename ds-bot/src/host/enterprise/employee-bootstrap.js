@@ -88,7 +88,8 @@ export async function startEmployeeDeployment(configFile, { executeRoom } = {}) 
   const workers = new Map()
   const clients = new Map()
   const readConfig = () => roster
-  const snapshot = createEnterpriseRuntimeRoster({ readConfig, workers }).readRoster()
+  const { readRoster } = createEnterpriseRuntimeRoster({ readConfig, workers })
+  const snapshot = readRoster()
   const nodes = new Set(config.workers.map(worker => worker.nodeId))
   for (const bot of Object.values(snapshot.bots)) {
     if ((!bot.private || bot.nodeId !== undefined) && !nodes.has(bot.nodeId)) throw invalid('Bot worker mapping')
@@ -101,18 +102,21 @@ export async function startEmployeeDeployment(configFile, { executeRoom } = {}) 
     clients.set(nodeId, client)
     workers.set(nodeId, createRemoteWorkerAdapter({ client, nodeId }))
   }
-  const runRoom = groups?.roomBots === undefined ? executeRoom : createRoomExecutor({ roster: snapshot, roomBots: groups.roomBots, clients })
+  const runRoom = groups?.roomBots === undefined ? executeRoom : createRoomExecutor({ roster: snapshot, roomBots: groups.roomBots, clients, readRoster })
   const groupRuntime = groups === undefined ? undefined : createEmployeeGroupRuntime({
     ...groups.limits, store: await openEmployeeGroupStore(groups.directory),
-    async execute(input) {
-      const room = snapshot.rooms[input.roomId]
+    openingRounds: roomId => Array.isArray(groups.roomBots?.[roomId]),
+    async execute(input, controls) {
+      const room = readRoster().rooms[input.roomId]
       if (!room?.people.includes(input.source.by)) throw invalid('room execution scope')
       // Room execution receives only room data and original actor attribution.
-      const reply = await runRoom(Object.freeze({ ...input, room }))
-      if (reply !== undefined && (reply?.roomId !== room.id || !room.members.includes(reply.by))) {
-        throw invalid('room reply scope')
+      const checked = reply => {
+        if (reply !== undefined && (reply?.roomId !== room.id || !room.members.includes(reply.by))) throw invalid('room reply scope')
+        return reply
       }
-      return reply
+      return checked(await runRoom(Object.freeze({ ...input, room }), controls && {
+        ...controls, publish: reply => controls.publish(checked(reply)),
+      }))
     },
   })
   return startEmployeeRuntime({ accountFile, initializeAccounts, readConfig, workers, limits,

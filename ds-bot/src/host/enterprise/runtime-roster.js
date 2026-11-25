@@ -1,3 +1,5 @@
+import { nameProblem } from '../../shared/mentions.js'
+
 const validId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value)
 const timestamp = value => Number.isSafeInteger(value) && value >= 0
 
@@ -32,9 +34,10 @@ function references(list, field, limit, allowed) {
 
 function snapshot(config) {
   if (!plain(config)) invalid('configuration')
-  const bots = table(config.bots, 'Bots', Infinity, ({ id, private: hidden = false, nodeId }) => {
+  const bots = table(config.bots, 'Bots', Infinity, ({ id, name = id, private: hidden = false, nodeId }) => {
+    if (typeof name !== 'string' || name !== name.trim() || name.length > 128 || nameProblem(name)) invalid('Bot name')
     if (typeof hidden !== 'boolean' || (nodeId !== undefined && !validId(nodeId))) invalid('Bot routing')
-    return { id, private: hidden, nodeId }
+    return { id, name, private: hidden, nodeId }
   })
   const shareableBot = id => bots[id]?.private === false
   const names = new Set()
@@ -45,11 +48,14 @@ function snapshot(config) {
       || (createdAt !== undefined && !timestamp(createdAt)) || (revokedAt !== undefined && !timestamp(revokedAt))) invalid('employee metadata')
     return { id, name, color, createdAt, revokedAt, botIds: references(botIds, 'employee Bot grants', Infinity, shareableBot) }
   })
-  const rooms = table(config.rooms, 'rooms', Infinity, ({ id, people: members, members: botMembers }) => ({
-    id,
-    people: references(members, 'room employee membership', 100, personId => Object.hasOwn(people, personId)),
-    members: references(botMembers, 'room Bot membership', Infinity, shareableBot),
-  }))
+  const rooms = table(config.rooms, 'rooms', Infinity, ({ id, people: members, members: botMembers, mode, admin }) => {
+    const ordered = references(botMembers, 'room Bot membership', Infinity, shareableBot)
+    if ((mode !== undefined && !['admin', 'everyone'].includes(mode)) || (admin !== undefined && !ordered.includes(admin))) invalid('room reply policy')
+    if (new Set(ordered.map(botId => bots[botId].name.toLowerCase())).size !== ordered.length) invalid('duplicate room Bot name')
+    return { id, ...(mode !== undefined && { mode }), ...(admin !== undefined && { admin }), members: ordered,
+      people: references(members, 'room employee membership', 100, personId => Object.hasOwn(people, personId)),
+    }
+  })
   return Object.freeze({ people, bots, rooms })
 }
 
