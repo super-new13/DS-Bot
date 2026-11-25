@@ -10,7 +10,7 @@ const routes = new Map([
   ['/api/enterprise/private-chat/send', 'POST'],
   ['/api/enterprise/private-chat/cancel', 'POST'],
 ])
-const ownerPaths = new Set(['invite', 'revoke', 'transcript', 'audit'].map(operation => '/api/enterprise/owner/' + operation))
+const ownerPaths = new Set(['invite', 'revoke', 'transcript', 'audit', 'rule'].map(operation => '/api/enterprise/owner/' + operation))
 const groupRoute = /^\/api\/enterprise\/group-chat\/[A-Za-z0-9_-]{1,128}\/(history|send)$/
 
 export function employeeRoute(path) {

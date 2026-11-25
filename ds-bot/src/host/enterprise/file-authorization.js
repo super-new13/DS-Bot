@@ -4,7 +4,7 @@ const operationFields = [...identityFields, 'roomId', 'operation', 'path', 'vers
 const ruleFields = ['id', 'personId', 'botId', 'roomId', 'directory', 'grant', 'effect', 'purpose']
 const id = value => typeof value === 'string' && value.length <= 256 && value.trim() !== ''
 const boundedText = (value, limit) => typeof value === 'string' && value.length <= limit && value.trim() !== ''
-const absolutePath = value => typeof value === 'string' && value.startsWith('/') && value.length <= 4096
+export const absoluteRulePath = value => typeof value === 'string' && value.startsWith('/') && value.length <= 4096
   && !value.includes('\\') && !value.includes('\0')
   && value.slice(1).split('/').every(part => part && part !== '.' && part !== '..')
 const exact = (value, fields) => value && typeof value === 'object' && Object.keys(value).length === fields.length
@@ -13,25 +13,32 @@ const validTime = time => Number.isSafeInteger(time) && time >= 0
 
 function scopedOperation(input) {
   if (!exact(input, operationFields) || !identityFields.every(field => id(input[field]))
-      || !(input.roomId === null || id(input.roomId)) || !grantFor.has(input.operation) || !absolutePath(input.path)
+      || !(input.roomId === null || id(input.roomId)) || !grantFor.has(input.operation) || !absoluteRulePath(input.path)
       || !(input.operation === 'create' ? input.version === null : boundedText(input.version, 512))
       || !(input.operation === 'read' ? input.contentDigest === null
         : typeof input.contentDigest === 'string' && /^[a-f0-9]{64}$/.test(input.contentDigest))) return undefined
   return Object.freeze(Object.fromEntries(operationFields.map(field => [field, input[field]])))
 }
 
-function matchRules(state, action) {
+export function validFileRule(rule, { operationOnly = false } = {}) {
+  const explicit = Object.hasOwn(rule ?? {}, 'operation')
+  const fields = explicit ? [...ruleFields.filter(key => key !== 'grant'), 'operation'] : ruleFields
+  return exact(rule, explicit && !operationOnly && Object.hasOwn(rule, 'grant') ? [...fields, 'grant'] : fields)
+    && id(rule.id) && id(rule.personId) && id(rule.botId) && (rule.roomId === null || id(rule.roomId))
+    && absoluteRulePath(rule.directory) && ['allow', 'deny'].includes(rule.effect) && boundedText(rule.purpose, 512)
+    && (explicit ? grantFor.has(rule.operation) && (!Object.hasOwn(rule, 'grant') || ['read', 'write'].includes(rule.grant))
+      : !operationOnly && ['read', 'write'].includes(rule.grant))
+}
+
+export function matchRules(state, action) {
   if (!id(state?.version) || !Array.isArray(state.rules) || state.rules.length > 1000) return undefined
   const ids = new Set()
   const matches = []
   for (const rule of state.rules) {
-    if (!exact(rule, ruleFields) || !id(rule.id) || ids.has(rule.id) || !id(rule.personId) || !id(rule.botId)
-        || !(rule.roomId === null || id(rule.roomId)) || !absolutePath(rule.directory)
-        || !['read', 'write'].includes(rule.grant) || !['allow', 'deny'].includes(rule.effect)
-        || !boundedText(rule.purpose, 512)) return undefined
+    if (!validFileRule(rule) || ids.has(rule.id)) return undefined
     ids.add(rule.id)
     if (rule.personId !== action.personId || rule.botId !== action.botId || rule.roomId !== action.roomId
-        || rule.grant !== grantFor.get(action.operation) || !action.path.startsWith(rule.directory + '/')) continue
+        || (rule.operation === undefined ? rule.grant !== grantFor.get(action.operation) : rule.operation !== action.operation) || !action.path.startsWith(rule.directory + '/')) continue
     if (rule.effect === 'deny') return undefined
     matches.push(rule)
   }
@@ -39,7 +46,7 @@ function matchRules(state, action) {
   // Longest directory wins. Rule IDs break equal-directory ties without locale dependence.
   matches.sort((a, b) => b.directory.length - a.directory.length || (a.id < b.id ? -1 : 1))
   const rule = matches[0]
-  return { version: state.version, rule: Object.freeze(Object.fromEntries(ruleFields.map(field => [field, rule[field]]))) }
+  return { version: state.version, rule: Object.freeze({ ...rule }) }
 }
 
 // The host supplies authoritative dispatch identity, current rules, and live access.
@@ -74,7 +81,8 @@ export function createBusinessFileAuthorization({ readRules, isAuthorized, now =
 
   function stillAllowed(record) {
     const live = current(record.action)
-    return live?.version === record.version && ruleFields.every(key => live.rule[key] === record.rule[key])
+    return live?.version === record.version && Object.keys(live.rule).length === Object.keys(record.rule).length
+      && Object.keys(record.rule).every(key => live.rule[key] === record.rule[key])
   }
 
   function prepare(input) {

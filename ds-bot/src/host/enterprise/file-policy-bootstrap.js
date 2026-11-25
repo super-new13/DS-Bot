@@ -58,6 +58,9 @@ export async function startFilePolicyBootstrap({ policy, worker, workerCredentia
   if (centralPaths.some(path => workerPaths.includes(path) || (sessionRoot && (path === sessionRoot || path.startsWith(sessionRoot + '/'))))) {
     throw new TypeError('Policy and worker storage paths overlap')
   }
+  if (policy.ruleFile !== undefined && [...centralPaths, ...workerPaths].includes(await storageKey(policy.ruleFile))) {
+    throw new TypeError('Employee rule file overlaps policy or worker storage')
+  }
   const { targetId, ...localTools } = fileTools
   const profile = new Context()
   let center
@@ -78,7 +81,7 @@ export async function startFilePolicyBootstrap({ policy, worker, workerCredentia
     const ingest = createFileEvidenceTlsClient({ origin: center.evidenceOrigin, ...producerIdentity.tls })
     const deliver = createFileSettlementDelivery({ ingest, reservations })
     let ready
-    const bootstrap = createWorkerBootstrap({ config, adapter, ingestEvidence: deliver, onReady: value => { ready = value },
+    const bootstrap = createWorkerBootstrap({ config, adapter, ruleFile: policy.ruleFile, ingestEvidence: deliver, onReady: value => { ready = value },
       fileTools: { ...localTools, permit: { nodeId: config.nodeId, path: localTools.path, targetId, client: reservations } },
     })
     stopWorker = await bootstrap.apply(profile)

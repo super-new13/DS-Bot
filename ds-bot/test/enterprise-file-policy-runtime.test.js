@@ -6,6 +6,8 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { createBusinessFileAuthorization, matchRules } from '../src/host/enterprise/file-authorization.js'
+import { createEmployeeRuleReader, openEmployeeRuleStore } from '../src/host/enterprise/rule-store.js'
 import { createFileEvidenceTlsClient } from '../src/host/enterprise/file-evidence-tls.js'
 import { startFilePolicyRuntime } from '../src/host/enterprise/file-policy-runtime.js'
 import { createFileReservationTlsClient } from '../src/host/enterprise/file-reservation-tls.js'
@@ -154,4 +156,59 @@ test('policy runtime rolls back its reservation listener when evidence binding f
   assert.equal(recovered.runtime.address.port, port)
   assert.notEqual(recovered.runtime.evidenceAddress.port, port)
   assert.deepEqual(await recovered.client.reserve(scope), { issued: true, status: 'reserved' })
+})
+
+test('shared rule file controls worker matching and new central reservations', posix, async t => {
+  const { start, settings, trustedProducer } = await fixture(t)
+  const file = join(settings.reservationFile, '..', 'rules.json')
+  const writer = await openEmployeeRuleStore(file, { initialize: true })
+  const readRules = createEmployeeRuleReader(file)
+  const worker = createBusinessFileAuthorization({ readRules, isAuthorized: () => true })
+  let request = 0
+  const update = (action, rule) => writer.change({ requestId: 'owner-' + ++request, at: request }, { action, rule }, () => true)
+  const base = { id: 'create-only', personId: scope.personId, botId: scope.botId, roomId: scope.roomId,
+    directory: '/files', operation: 'create', effect: 'allow', purpose: 'Fixture business purpose' }
+  await update('create', base)
+  const target = '/files/work/note'
+  const { client, runtime } = await start({ initialize: true, ruleFile: file, canReserve: undefined,
+    resolveTarget: (id, input) => id === 'note' && input.nodeId === 'node' ? target : undefined })
+  const create = { ...scope, operation: 'create', version: null, ruleId: base.id, ruleVersion: '1' }
+  const workerInput = input => {
+    const { personId, botId, roomId, sessionId, requestId, dispatchId, operation, version, contentDigest } = input
+    return { personId, botId, roomId, sessionId, requestId, dispatchId, operation, version, contentDigest, path: target }
+  }
+  assert.equal(worker.prepare(workerInput(scope)), undefined)
+  assert.equal(worker.prepare(workerInput(create))?.ruleVersion, '1')
+  await assert.rejects(client.reserve({ ...scope, ruleId: base.id, ruleVersion: '1' }), refused)
+  await assert.rejects(client.reserve({ ...create, targetId: 'unmapped' }), refused)
+  assert.deepEqual(await client.reserve(create), { issued: true, status: 'reserved' })
+  const evidence = { scope: create, status: 'completed', evidenceId: 'evidence' }
+  await runtime.ingest(trustedProducer, evidence)
+  await client.settle(create, evidence.status, evidence.evidenceId)
+  await update('create', { ...base, id: 'more-specific', directory: '/files/work' })
+  assert.equal(worker.prepare(workerInput({ ...create, dispatchId: 'more' }))?.ruleId, 'more-specific')
+  await assert.rejects(client.reserve({ ...create, dispatchId: 'stale' }), refused)
+  await assert.rejects(client.reserve({ ...create, dispatchId: 'loses', ruleVersion: '2' }), refused)
+  const good = readFileSync(file)
+  writeFileSync(file, good.subarray(0, good.length / 2))
+  assert.equal(worker.prepare(workerInput({ ...create, dispatchId: 'broken' })), undefined)
+  await assert.rejects(client.reserve({ ...create, dispatchId: 'broken', ruleVersion: '2', ruleId: 'more-specific' }), refused)
+  writeFileSync(file, good)
+  assert.equal(readRules().version, '2')
+  await update('edit', { ...base, effect: 'deny' })
+  assert.equal(worker.prepare(workerInput({ ...create, dispatchId: 'blocked' })), undefined)
+  await assert.rejects(client.reserve({ ...create, dispatchId: 'blocked', ruleVersion: '3', ruleId: 'more-specific' }), refused)
+  await update('retire', { id: base.id })
+  await update('retire', { id: 'more-specific' })
+  assert.equal(readRules().version, '5')
+  await assert.rejects(client.reserve({ ...create, dispatchId: 'retired', ruleVersion: '5' }), refused)
+  assert.deepEqual(await client.reserve(create), { issued: false, status: 'completed' })
+  assert.equal(createEmployeeRuleReader(file)().version, '5')
+  const changes = JSON.parse(readFileSync(file)).changes
+  assert.deepEqual(changes.map(({ version, ownerRequestId, at, rule }) => [version, ownerRequestId, at, rule.id]),
+    [[1, 'owner-1', 1, base.id], [2, 'owner-2', 2, 'more-specific'], [3, 'owner-3', 3, base.id],
+      [4, 'owner-4', 4, base.id], [5, 'owner-5', 5, 'more-specific']])
+  const { operation: _, ...legacy } = base
+  assert.equal(matchRules({ version: 'legacy', rules: [{ ...legacy, grant: 'write' }] }, workerInput(scope))?.rule.id, base.id)
+  assert.equal(matchRules({ version: 'explicit', rules: [{ ...base, grant: 'write' }] }, workerInput(scope)), undefined)
 })

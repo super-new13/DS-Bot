@@ -10,10 +10,13 @@
 <body>
   <main>
     <header><h1>DS Bot · Owner</h1><button id="clear" type="button">Clear credential and results</button></header>
+    <section class="card" aria-labelledby="credential-title">
+      <h2 id="credential-title">Owner credential</h2>
+      <label>Owner token <input id="token" type="password" autocomplete="off" maxlength="43"></label>
+    </section>
     <section class="card" aria-labelledby="transcript-title">
       <h2 id="transcript-title">Private transcripts</h2>
       <form id="owner-form" autocomplete="off">
-        <label>Owner token <input id="token" type="password" autocomplete="off" maxlength="43"></label>
         <label>Employee ID <input id="person" maxlength="128" required></label>
         <label>Bot ID <input id="bot" maxlength="128" required></label>
         <button class="primary">View transcript</button>
@@ -21,6 +24,28 @@
       <p id="status" role="status"></p>
       <div id="messages" aria-label="Transcript"></div>
       <button id="older" type="button" hidden>Older turns</button>
+    </section>
+    <section class="card" aria-labelledby="rules-title">
+      <h2 id="rules-title">Employee file rules</h2>
+      <form id="rule-form" autocomplete="off">
+        <label>Change
+          <select id="rule-action"><option value="create">Create</option><option value="edit">Edit</option><option value="retire">Retire</option></select>
+        </label>
+        <label>Rule ID <input id="rule-id" maxlength="256" required></label>
+        <fieldset id="rule-fields">
+          <label>Employee ID <input id="rule-person" maxlength="256" required></label>
+          <label>Bot ID <input id="rule-bot" maxlength="256" required></label>
+          <label>Room ID (optional, leave blank for private chat) <input id="rule-room" maxlength="256"></label>
+          <label>Directory <input id="rule-directory" maxlength="4096" required></label>
+          <label>File operation
+            <select id="rule-operation"><option value="read">Read</option><option value="create">Create</option><option value="modify">Modify</option></select>
+          </label>
+          <label>Effect <select id="rule-effect"><option value="deny">Deny</option><option value="allow">Allow</option></select></label>
+          <label>Purpose <textarea id="rule-purpose" maxlength="512" required></textarea></label>
+        </fieldset>
+        <button id="rule-save" class="primary">Save rule change</button>
+      </form>
+      <p id="rule-status" role="status"></p>
     </section>
   </main>
 </body>

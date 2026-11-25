@@ -1,3 +1,4 @@
+import { createEmployeeRuleReader } from './rule-store.js'
 import { constants } from 'node:fs'
 import { open, realpath } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
@@ -30,9 +31,10 @@ async function loadPem(path) {
 }
 
 // File callbacks are accepted only as a programmatic dependency of the trusted entry.
-function snapshotFileTools(options, nodeId) {
+function snapshotFileTools(options, nodeId, ruleFile) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) throw invalid()
-  const { root, path, workerOwned, readRules, isAuthorized, adjudicate, writeAudit, permit, onCompleted, maxBytes = 256 * 1024 } = options
+  const { root, path, workerOwned, readRules: legacyRules, isAuthorized, adjudicate, writeAudit, permit, onCompleted, maxBytes = 256 * 1024 } = options
+  const readRules = ruleFile === undefined ? legacyRules : createEmployeeRuleReader(ruleFile)
   const canonical = value => absolute(value) && !value.includes(String.fromCharCode(0)) && resolve(value) === value
   if (workerOwned !== true || !canonical(root) || root === sep || !canonical(path) || !path.startsWith(root + sep)
       || ![readRules, isAuthorized, adjudicate].every(callback => typeof callback === 'function')
@@ -53,10 +55,13 @@ function snapshotFileTools(options, nodeId) {
 
 // The trusted DSH entry passes its administrator settings and model adapter
 // directly. This snapshots grants for the lifetime of the activated plugin.
-export function createWorkerBootstrap({ config, adapter, onReady, fileTools, ingestEvidence } = {}) {
+export function createWorkerBootstrap({ config, adapter, onReady, fileTools, ingestEvidence, ruleFile } = {}) {
   if (Object.hasOwn(config ?? {}, 'fileTools')) throw invalid()
   const { nodeId, provider, model, receiptPath, mappingPath, sessionRoot, auditFile, outboxFile, initialize = false, host, port, origin, certPaths, peerGrants } = config ?? {}
-  const trustedFileTools = fileTools === undefined ? undefined : snapshotFileTools(fileTools, nodeId)
+  const trustedFileTools = fileTools === undefined ? undefined : snapshotFileTools(fileTools, nodeId, ruleFile)
+  if (ruleFile !== undefined && (!trustedFileTools || !absolute(ruleFile) || resolve(ruleFile) !== ruleFile
+      || [receiptPath, mappingPath, auditFile, outboxFile, trustedFileTools.path, ...Object.values(certPaths ?? {})]
+        .some(path => absolute(path) && resolve(path) === ruleFile))) throw invalid()
   if (auditFile !== undefined && (!absolute(auditFile) || auditFile.includes(String.fromCharCode(0))
       || !trustedFileTools || trustedFileTools.writeAudit !== undefined)) throw invalid()
   if (outboxFile === undefined ? ingestEvidence !== undefined

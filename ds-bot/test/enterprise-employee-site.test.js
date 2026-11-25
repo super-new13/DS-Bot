@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
+import { createHash, randomBytes } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { request } from 'node:https'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,7 +13,7 @@ const origin = 'https://' + host
 const auth = '/api/enterprise/auth/'
 const send = '/api/enterprise/private-chat/send'
 
-async function fixture(t) {
+async function fixture(t, { ownerRules = false } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'ds-bot-employee-site-'))
   let runtime
   t.after(async () => {
@@ -24,8 +25,14 @@ async function fixture(t) {
     '-addext', 'subjectAltName=DNS:localhost,IP:' + host, '-keyout', keyPath, '-out', certPath], { stdio: 'ignore', timeout: 5000 })
   const cert = await readFile(certPath)
   const submissions = []
+  const token = ownerRules ? randomBytes(32).toString('base64url') : undefined
+  const ruleFile = join(dir, 'rules.json')
+  const transcriptDirectory = join(dir, 'transcripts')
+  if (ownerRules) await mkdir(transcriptDirectory, { mode: 0o700 })
   runtime = await startEmployeeRuntime({
     accountFile: join(dir, 'accounts.json'), initializeAccounts: true,
+    ...(ownerRules && { owner: { tokenHash: createHash('sha256').update(token).digest('hex'),
+      transcriptDirectory, ruleFile, initializeRules: true } }),
     https: { origin, tls: { key: await readFile(keyPath), cert } },
     readConfig: () => ({ people: { employee: { id: 'employee', name: 'Employee', botIds: ['helper'] } },
       bots: { helper: { id: 'helper', nodeId: 'mock' } }, rooms: {} }),
@@ -57,7 +64,7 @@ async function fixture(t) {
     const text = (await Array.fromAsync(res.setEncoding('utf8'))).join('')
     return { status: res.statusCode, headers: res.headers, text }
   }
-  return { call, accounts: runtime.accounts, submissions }
+  return { call, accounts: runtime.accounts, submissions, token, ruleFile }
 }
 
 const assets = [
@@ -126,4 +133,30 @@ test('the same HTTPS origin serves the pilot and preserves private chat authoriz
   assert.equal(frames[2].status, 'completed')
   assert.equal(submissions.length, 1)
   assert.equal(submissions[0].personId, 'employee')
+})
+
+test('employee HTTPS protects and audits owner rule changes', { timeout: 10000 }, async t => {
+  const { call, token, ruleFile } = await fixture(t, { ownerRules: true })
+  const route = '/api/enterprise/owner/rule'
+  const rule = { id: 'request-doc', personId: 'employee', botId: 'helper', roomId: null, directory: '/files',
+    operation: 'create', effect: 'allow', purpose: 'Prepare a requested document' }
+  const json = { action: 'create', rule }
+  const headers = { authorization: 'Bearer ' + token }
+  assert.match((await call('/owner')).text, /Employee file rules/)
+  assert.ok((await call('/owner.js')).text.includes(route))
+  assert.equal((await call(route, { json, headers: { cookie: '__Host-dsbot-employee=fixture' } })).status, 401)
+  assert.equal((await call(route, { json, headers: { ...headers, origin: 'https://foreign.invalid' } })).status, 403)
+  assert.equal((await call(route, { json: { ...json, rule: { ...rule, grant: 'write' } }, headers })).status, 400)
+  const created = await call(route, { json, headers })
+  assert.equal(created.status, 201)
+  assert.equal(created.headers['cache-control'], 'no-store')
+  assert.equal((await call(route, { json, headers })).status, 409)
+  const edited = await call(route, { json: { action: 'edit', rule: { ...rule, operation: 'modify' } }, headers })
+  assert.equal(edited.status, 200)
+  const retired = await call(route, { json: { action: 'retire', rule: { id: rule.id } }, headers })
+  assert.equal(retired.status, 200)
+  const { changes } = JSON.parse(await readFile(ruleFile, 'utf8'))
+  assert.deepEqual(changes.map(row => [row.version, row.action, row.rule.id, row.ownerRequestId]),
+    [created, edited, retired].map(({ text }, i) => [i + 1, ['create', 'edit', 'retire'][i], rule.id, JSON.parse(text).ownerRequestId]))
+  assert.ok(changes.every(({ at }) => at > 0))
 })

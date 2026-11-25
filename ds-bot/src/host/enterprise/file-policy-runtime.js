@@ -3,6 +3,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path'
 import { startFileEvidenceTls } from './file-evidence-tls.js'
 import { openFileReservationStore } from './file-reservation-store.js'
 import { startFileReservationTls } from './file-reservation-tls.js'
+import { createRuleReservationGate } from './rule-service.js'
 import { createFileReservations } from './file-reservations.js'
 import { openFileSettlementEvidence } from './file-settlement-evidence.js'
 
@@ -36,9 +37,10 @@ async function closeAll(...resources) {
 // Network evidence ingestion uses a separate, explicitly enrolled identity set.
 // The reservation listener only has access to the read-only verifier.
 export async function startFilePolicyRuntime({ reservationFile, evidenceFile, initialize = false,
-  trustedProducer, canReserve, resolveWorker, workerGrants, authorizeScope, listener, evidenceListener } = {}) {
+  trustedProducer, canReserve, ruleFile, resolveTarget, resolveWorker, workerGrants, authorizeScope, listener, evidenceListener } = {}) {
   if (![reservationFile, evidenceFile].every(absoluteFile) || typeof initialize !== 'boolean'
-      || typeof trustedProducer !== 'symbol' || ![canReserve, authorizeScope].every(fn => typeof fn === 'function')
+      || typeof trustedProducer !== 'symbol' || typeof authorizeScope !== 'function' || ((ruleFile === undefined || canReserve !== undefined) && typeof canReserve !== 'function')
+      || (resolveTarget !== undefined && (ruleFile === undefined || typeof resolveTarget !== 'function'))
       || !listener?.tls?.ca || !listener.tls.cert || !listener.tls.key) {
     throw new TypeError('Invalid file policy runtime configuration')
   }
@@ -61,6 +63,10 @@ export async function startFilePolicyRuntime({ reservationFile, evidenceFile, in
   const [reservationPath, evidencePath] = await Promise.all([canonicalFile(reservationFile), canonicalFile(evidenceFile)])
   if (reservationPath === evidencePath) throw new TypeError('File policy stores must be separate files')
 
+  const rulePath = ruleFile === undefined ? undefined : await canonicalFile(ruleFile)
+  if (rulePath && [reservationPath, evidencePath].includes(rulePath)) throw new TypeError('File policy stores must be separate files')
+  const admitReservation = rulePath === undefined ? canReserve : createRuleReservationGate({ ruleFile: rulePath, resolveTarget, canReserve })
+
   let reservationStore
   let evidenceStore
   let entry
@@ -76,7 +82,7 @@ export async function startFilePolicyRuntime({ reservationFile, evidenceFile, in
   try {
     reservationStore = await openFileReservationStore(reservationPath, { initialize })
     evidenceStore = await openFileSettlementEvidence(evidencePath, { trustedProducer, initialize })
-    const reservations = createFileReservations({ transact: reservationStore.transact, canReserve })
+    const reservations = createFileReservations({ transact: reservationStore.transact, canReserve: admitReservation })
     entry = await startFileReservationTls({ ...listener, reservations, resolveWorker: workerIdentity, authorizeScope,
       verifySettlement: evidenceStore.verifySettlement,
     })

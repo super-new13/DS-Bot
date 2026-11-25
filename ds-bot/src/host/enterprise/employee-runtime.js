@@ -1,3 +1,4 @@
+import { openEmployeeRuleStore } from './rule-store.js'
 import { stat } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import { createStandaloneOwnerHandler } from './admin-route.js'
@@ -24,6 +25,7 @@ export async function startEmployeeRuntime({ accountFile, initializeAccounts = f
   roster.readRoster()
   let ownerAdmission
   let transcriptStore
+  let ruleStore
   if (owner !== undefined) {
     ownerAdmission = createOwnerAdmission({ origin: options.origin, tokenHash: owner?.tokenHash })
     if (typeof owner.transcriptDirectory !== 'string' || !isAbsolute(owner.transcriptDirectory)
@@ -31,12 +33,15 @@ export async function startEmployeeRuntime({ accountFile, initializeAccounts = f
       throw new TypeError('Expected a private absolute transcript directory')
     }
     transcriptStore = await openEmployeeTranscriptStore(owner.transcriptDirectory)
+    if (owner.ruleFile !== undefined) {
+      ruleStore = await openEmployeeRuleStore(owner.ruleFile, { initialize: owner.initializeRules })
+    }
   }
   const employeeAsset = await loadEmployeeSite({ owner: Boolean(ownerAdmission) })
   const store = await openEmployeeAccountStore(accountFile, { initialize: initializeAccounts })
   const accounts = createEmployeeAccounts(store)
   const handleOwner = ownerAdmission && createStandaloneOwnerHandler({ accounts, readRoster: roster.readRoster,
-    isOwner: ownerAdmission.isOwner, transcriptStore })
+    isOwner: ownerAdmission.isOwner, transcriptStore, ruleStore })
   const handler = createEmployeeServiceHandler({ origin: options.origin, accounts, ...roster, limits, readHistory, enqueueGroup, transcriptStore, handleOwner })
   const entry = await startEnterpriseHttpsEntry({ ...options, handler, employeeAsset, ownerAdmission })
   return { address: entry.address, close: entry.close, accounts }

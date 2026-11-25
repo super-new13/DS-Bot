@@ -32,9 +32,12 @@ function check(config) {
   if (!exact(config, ['accountFile', 'https', 'workers', 'roster', 'limits'], ['initializeAccounts', 'groups', 'owner'])) throw invalid('root')
   const { accountFile, initializeAccounts, https, workers, roster, limits } = config
   if (!absolute(accountFile) || (initializeAccounts !== undefined && typeof initializeAccounts !== 'boolean')) throw invalid('accounts')
-  if (config.owner !== undefined && (!exact(config.owner, ['tokenHash', 'transcriptDirectory'])
+  if (config.owner !== undefined && (!exact(config.owner, ['tokenHash', 'transcriptDirectory'], ['ruleFile', 'initializeRules'])
       || typeof config.owner.tokenHash !== 'string' || !/^[a-f0-9]{64}$/.test(config.owner.tokenHash)
-      || !absolute(config.owner.transcriptDirectory))) throw invalid('owner settings')
+      || !absolute(config.owner.transcriptDirectory)
+      || (Object.hasOwn(config.owner, 'ruleFile') && !absolute(config.owner.ruleFile))
+      || (Object.hasOwn(config.owner, 'initializeRules')
+        && (!config.owner.ruleFile || typeof config.owner.initializeRules !== 'boolean')))) throw invalid('owner settings')
   if (!exact(https, ['origin', 'host', 'port', 'certFile', 'keyFile']) || !origin(https.origin)
       || typeof https.host !== 'string' || !isIP(https.host) || !Number.isInteger(https.port) || https.port < 0 || https.port > 65535
       || !absolute(https.certFile) || !absolute(https.keyFile)) throw invalid('HTTPS listener')
