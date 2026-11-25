@@ -34,6 +34,7 @@ import { searchGroupBook } from './group-search.js'
 import { threadCurrentOfPart } from './threads.js'
 import { failureLine } from './turns.js'
 import { parseBook } from './ledger.js'
+import { selectRoomOpening } from './room-opening.js'
 
 const ROOM_LOG_MAX = 60
 const ROOM_FIRST_LOOK = 12
@@ -1926,31 +1927,10 @@ export function install(rt) {
     },
   }))
 
-  // A Bot that posts never answers its own post. @mentions choose the speakers; else
-  // the admin answers alone in admin mode, or first of everyone. What a member posts
-  // after its round moved on is answered by the member that asked for it; work the
-  // user asked for is left for the user to read.
-  // `ordered`: a plain message everyone answers in turn, admin first; any other call
-  // starts its members at once.
   function openingCall(room, opener) {
-    const everyone = room.members.map(rt.botOf).filter(Boolean)
-    const members = everyone.filter(bot => bot.id !== opener.botId)
-    const admin = members.find(bot => rt.isAdminOf(room, bot.id))
-    const at = speakers => ({ speakers, ordered: false })
-    if (opener.kickoff) return at(admin ? [admin] : [])
-    if (opener.quiet) return at([])
-    if (opener.done) return at(members.filter(bot => bot.id === opener.askedBy))
-    // A goal post — the user's draft ask, an idle goal check, a resume — is the admin's alone.
-    if (opener.goal !== undefined) return at(admin ? [admin] : [])
-    const { all, found: named } = mentionsOf(opener, everyone) ?? mentionsIn(opener.text, everyone, opener.references)
-    const found = named.filter(bot => bot.id !== opener.botId)
-    if (opener.progress) return at(found)
-    if (opener.late) return at(found.length > 0 ? found : members.filter(bot => bot.id === opener.askedBy))
-    if (opener.member) return at(found)
-    if (found.length > 0 && !all) return at(found)
-    if (!all && room.mode === 'admin' && admin) return at([admin])
-    const speakers = admin ? [admin, ...members.filter(bot => bot !== admin)] : members
-    return { speakers, ordered: !all && speakers.length > 1 }
+    const members = room.members.map(rt.botOf).filter(Boolean)
+    return selectRoomOpening({ members, adminId: room.admin, mode: room.mode, opener },
+      () => mentionsOf(opener, members) ?? mentionsIn(opener.text, members, opener.references))
   }
   const openingSpeakers = (room, opener) => openingCall(room, opener).speakers
 
