@@ -68,6 +68,7 @@ def run(port, owner_token):
     # The owner admission allows 8 owner requests per minute per client address;
     # the calls above already used 6 (invite 401, invite 201, transcript 401, transcript 200, audit 503, page 200).
     time.sleep(61)
+    call(owner + 'rule', 201, {'action': 'create', 'rule': rule}, bearer=owner_token)
     prompt = {'botId': 'helper', 'text': 'Create the fixture note'}
     call(send, 401, prompt)
     call(send, 403, {**prompt, 'botId': 'foreign'}, cookie)
