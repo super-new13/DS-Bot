@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 
 const root = '/internal/enterprise/worker/'
 const actions = new Map([
+  ['audit', ['ownerRequestId', 'query']],
   ['create', ['nodeId', 'botId', 'personId']],
   ['submit', ['nodeId', 'botId', 'personId', 'sessionId', 'requestId', 'text']],
   ['cancel', ['nodeId', 'botId', 'personId', 'sessionId', 'requestId']],
@@ -93,10 +94,11 @@ function liveReply(authorized) {
 // callback gets the Request. authorizePeer must synchronously check current
 // node, actor, Bot, Session and action grants against authoritative state.
 // The worker context must already enforce its execution and tool boundary.
-export function createWorkerHttpHandler({ nodeId, origin, authenticatePeer, authorizePeer, worker, receipts,
+export function createWorkerHttpHandler({ nodeId, origin, authenticatePeer, authorizePeer, worker, receipts, audit,
   maxBodyBytes = 16384, maxActive = 4, allowRooms = false }) {
   if (!validId(nodeId) || new URL(origin).origin !== origin || !origin.startsWith('https://')
       || typeof authenticatePeer !== 'function' || typeof authorizePeer !== 'function' || typeof allowRooms !== 'boolean'
+      || (audit !== undefined && typeof audit?.readAudit !== 'function')
       || !Number.isSafeInteger(maxBodyBytes) || maxBodyBytes < 1 || maxBodyBytes > 65536
       || !Number.isSafeInteger(maxActive) || maxActive < 1) throw new TypeError('Invalid worker HTTP configuration')
   const active = new Map()
@@ -166,6 +168,29 @@ export function createWorkerHttpHandler({ nodeId, origin, authenticatePeer, auth
     }
   }
 
+  function permission(peer, target) {
+    return () => {
+      try { return authorizePeer(peer, target) === true } catch { return false }
+    }
+  }
+
+  async function readAudit(body, peer, signal) {
+    const target = Object.freeze({ action: 'audit', scope: Object.freeze({ nodeId }), requestId: undefined })
+    const check = permission(peer, target)
+    const permitted = () => !signal.aborted && check()
+    if (!permitted()) return refused()
+    if (Object.keys(body).length !== 2 || !validId(body.ownerRequestId) || !Object.hasOwn(body, 'query')) return error(400, 'invalid-request')
+    if (!audit) return error(503, 'worker-unavailable')
+    try {
+      const result = await audit.readAudit(body.query, body.ownerRequestId, permitted)
+      return permitted() ? json(200, result) : refused()
+    } catch (cause) {
+      if (!permitted() || cause?.code === 'not-authorized') return refused()
+      if (cause?.code === 'invalid-audit-query') return error(400, 'invalid-audit-query')
+      return error(503, 'worker-unavailable')
+    }
+  }
+
   return async (request, transport) => {
     const url = new URL(request.url)
     const action = url.pathname.startsWith(root) ? url.pathname.slice(root.length) : ''
@@ -178,6 +203,7 @@ export function createWorkerHttpHandler({ nodeId, origin, authenticatePeer, auth
       if (peer === undefined || peer === null || peer === false) return refused()
       const body = await readBody(request, maxBodyBytes)
       if (body instanceof Response) return body
+      if (action === 'audit') return await readAudit(body, peer, request.signal)
       const scopedFields = Object.hasOwn(body, 'roomId') ? [...fields, 'roomId'] : fields
       if (Object.keys(body).length !== scopedFields.length || !scopedFields.every(key => Object.hasOwn(body, key)
           && (key === 'text' ? typeof body.text === 'string' && body.text.trim() !== '' : validId(body[key])))) {
@@ -189,9 +215,7 @@ export function createWorkerHttpHandler({ nodeId, origin, authenticatePeer, auth
       const room = roomId === undefined ? {} : { roomId }
       const scope = Object.freeze({ nodeId, botId, personId, ...room, ...(sessionId === undefined ? {} : { sessionId }) })
       const target = Object.freeze({ action, scope, requestId })
-      const permitted = () => {
-        try { return authorizePeer(peer, target) === true } catch { return false }
-      }
+      const permitted = permission(peer, target)
       if (!permitted()) return refused()
       const sessionKey = JSON.stringify(roomId === undefined ? [nodeId, botId, personId] : ['room', nodeId, botId, roomId])
       const adapterScope = { botId, personId, sessionId, sessionKey, ...room }

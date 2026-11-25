@@ -25,10 +25,10 @@ function release(reader, complete) {
   reader.releaseLock()
 }
 
-async function readJson(response) {
+async function readJson(response, maxBytes = 4096) {
   if (!response.body || mediaType(response) !== 'application/json') throw invalidResponse()
   const reader = response.body.getReader()
-  const buffer = new Uint8Array(4096)
+  const buffer = new Uint8Array(maxBytes)
   let size = 0
   let complete = false
   try {
@@ -140,6 +140,34 @@ export function createWorkerClient({ origin, nodeId, transport, maxFrameBytes = 
     return acknowledge('cancel', operation(scope, requestId), signal, 202, result => exact(result, ['accepted']) && result.accepted === true)
   }
 
+  async function readAudit(scope, input, { signal } = {}) {
+    if (!exact(scope, ['nodeId']) || scope.nodeId !== nodeId || !exact(input, ['ownerRequestId', 'query'])
+        || !validId(input.ownerRequestId)) throw new TypeError('Invalid worker audit request')
+    try {
+      const response = await send('audit', input, signal)
+      if (response.status === 403) {
+        void response.body?.cancel().catch(() => {})
+        throw error('worker-refused', 403)
+      }
+      if (response.status === 400) {
+        const result = await readJson(response)
+        if (exact(result, ['error']) && result.error === 'invalid-audit-query') throw error('invalid-audit-query', 400)
+        throw invalidResponse()
+      }
+      if (response.status !== 200) {
+        void response.body?.cancel().catch(() => {})
+        throw invalidResponse()
+      }
+      const result = await readJson(response, maxStreamBytes)
+      if (!exact(result, ['events', 'nextOffset']) || !Array.isArray(result.events)
+          || !(result.nextOffset === null || timestamp(result.nextOffset))) throw invalidResponse()
+      return Object.freeze(result)
+    } catch (cause) {
+      if (cause?.code === 'worker-refused' || cause?.code === 'invalid-audit-query') throw cause
+      throw error('worker-outcome-unknown')
+    }
+  }
+
   async function status(scope, requestId, { signal } = {}) {
     const input = operation(scope, requestId)
     try {
@@ -195,5 +223,5 @@ export function createWorkerClient({ origin, nodeId, transport, maxFrameBytes = 
     return admission ? Object.freeze({ ...admission, status: 'unknown' }) : unknown(requestId)
   }
 
-  return { create, submit, cancel, status }
+  return { create, submit, cancel, status, readAudit }
 }

@@ -4,7 +4,7 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { checkServerIdentity } from 'node:tls'
 
-const paths = new Set(['create', 'submit', 'cancel', 'status'].map(action => '/internal/enterprise/worker/' + action))
+const paths = new Set(['create', 'submit', 'cancel', 'status', 'audit'].map(action => '/internal/enterprise/worker/' + action))
 const requestFields = ['content-type', 'content-encoding']
 const validLimit = value => Number.isSafeInteger(value) && value >= 1 && value <= 2 ** 31 - 1
 const transportError = code => Object.assign(new Error(code), { code })
