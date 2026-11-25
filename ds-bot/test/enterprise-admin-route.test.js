@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { openEmployeeAccountStore } from '../src/host/enterprise/account-store.js'
 import { createEmployeeAccounts } from '../src/host/enterprise/accounts.js'
+import { openFileAuditStore } from '../src/host/enterprise/file-audit-store.js'
 import { registerEmployeeAdminRoute } from '../src/host/enterprise/admin-route.js'
 
 const path = '/api/bot/enterprise-admin'
@@ -112,4 +113,52 @@ test('route never logs invitation or backend diagnostic material', async t => {
   assert.equal(error.headers.get('cache-control'), 'no-store')
   assert.deepEqual(await error.json(), { error: 'Account operation could not be confirmed' })
   assert.ok(logs.every(log => log.mock.callCount() === 0))
+})
+
+test('owner audit reads filter and paginate redacted entries and persist each view', { skip: process.platform === 'win32' }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsbot-owner-audit-'))
+  const file = join(dir, 'audit.json')
+  const auditStore = await openFileAuditStore(file, { initialize: true })
+  t.after(async () => {
+    await auditStore.close()
+    await rm(dir, { recursive: true, force: true })
+  })
+  const { accounts, readRoster } = await fixture(t)
+  const authorization = { type: 'file-authorization', personId: 'alice', botId: 'helper', roomId: null,
+    sessionId: 's1', requestId: 'r1', dispatchId: 'd1', operation: 'modify', ruleId: 'rule', ruleVersion: 'v1', verdict: 'allowed' }
+  const effect = { ...authorization, type: 'file-effect', outcome: 'completed' }
+  await auditStore.writeAudit(authorization)
+  await auditStore.writeAudit({ ...authorization, personId: 'bob' })
+  await auditStore.writeAudit({ ...authorization, botId: 'other' })
+  await auditStore.writeAudit({ ...authorization, operation: 'read' })
+  await auditStore.writeAudit({ ...authorization, verdict: 'denied' })
+  await auditStore.writeAudit(effect)
+  const dsh = mockDsh()
+  registerEmployeeAdminRoute(dsh.ctx, { accounts, readRoster, auditStore })
+  const query = { personId: 'alice', botId: 'helper', operation: 'modify', verdict: 'allowed', limit: 1 }
+  const input = { operation: 'audit', query }
+  const before = await readFile(file, 'utf8')
+  assert.equal((await call(dsh, input, { cookie: employeeCookie })).status, 401)
+  assert.equal((await call(dsh, input, { site: 'https://foreign.invalid' })).status, 403)
+  for (const bad of [{ limit: 101 }, { offset: -1 }, { operation: 'delete' }, { verdict: 'unknown' }, { path: '/hidden' }]) {
+    assert.equal((await call(dsh, { ...input, query: { ...query, ...bad } })).status, 400)
+  }
+  assert.equal(await readFile(file, 'utf8'), before)
+  const first = await call(dsh, input)
+  assert.equal(first.status, 200)
+  assert.equal(first.headers.get('cache-control'), 'no-store')
+  assert.deepEqual(await first.json(), { events: [authorization], nextOffset: 1 })
+  assert.deepEqual(await (await call(dsh, { ...input, query: { ...query, offset: 1 } })).json(), { events: [effect], nextOffset: null })
+  assert.deepEqual(await (await call(dsh, { ...input, query: { personId: 'absent' } })).json(), { events: [], nextOffset: null })
+  const views = JSON.parse(await readFile(file, 'utf8')).events.slice(6)
+  assert.deepEqual(views.map(({ type, personId, botId }) => [type, personId, botId]), [
+    ['audit-view', 'alice', 'helper'], ['audit-view', 'alice', 'helper'], ['audit-view', 'absent', null],
+  ])
+  assert.equal(new Set(views.map(({ ownerRequestId }) => ownerRequestId)).size, 3)
+  assert.ok(views.every(({ time }) => Number.isSafeInteger(time) && time <= Date.now()))
+  await auditStore.close()
+  const reopened = await openFileAuditStore(file)
+  try {
+    assert.deepEqual(await reopened.readAudit(query, 'fixture-reopen', () => true), { events: [authorization], nextOffset: 1 })
+  } finally { await reopened.close() }
 })

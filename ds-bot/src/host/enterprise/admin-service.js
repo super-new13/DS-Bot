@@ -1,3 +1,5 @@
+import { createOwnerAuditView } from './audit-view.js'
+
 const validId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value)
 
 function refused() {
@@ -7,7 +9,7 @@ function refused() {
 // The caller supplies authenticated host context separately from the employee ID.
 // isOwner and readRoster are synchronous live checks. Reuse the account service
 // owned by the runtime so admin and employee operations share one writer.
-export function createEmployeeAdminService({ accounts, isOwner, readRoster } = {}) {
+export function createEmployeeAdminService({ accounts, isOwner, readRoster, auditStore } = {}) {
   if (typeof accounts?.issueInvite !== 'function' || typeof accounts?.revokeAccount !== 'function'
       || typeof isOwner !== 'function' || typeof readRoster !== 'function') {
     throw new TypeError('Expected live accounts, owner authorization and roster')
@@ -20,7 +22,9 @@ export function createEmployeeAdminService({ accounts, isOwner, readRoster } = {
     if (person?.id !== personId || (inviting && person.revokedAt !== undefined) || isOwner(context) !== true) throw refused()
   }
 
+  const audit = auditStore === undefined ? undefined : createOwnerAuditView({ auditStore, isOwner })
   return {
+    audit,
     async invite(context, personId) {
       requireEmployee(context, personId, true)
       return accounts.issueInvite(personId)

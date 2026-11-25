@@ -5,6 +5,29 @@ import { basename, dirname, isAbsolute, join } from 'node:path'
 
 const common = ['type', 'personId', 'botId', 'roomId', 'sessionId', 'requestId', 'dispatchId', 'operation', 'ruleId', 'ruleVersion', 'verdict']
 const occupied = new Set()
+const filterKeys = ['personId', 'botId', 'operation', 'verdict']
+const auditOperations = ['create', 'modify', 'read']
+const verdicts = ['allowed', 'denied']
+const badQuery = () => Object.assign(new Error('Invalid audit query'), { code: 'invalid-audit-query' })
+
+function readQuery(query) {
+  const allowed = [...filterKeys, 'offset', 'limit']
+  if (!query || typeof query !== 'object' || Array.isArray(query) || Object.keys(query).some(key => !allowed.includes(key))) throw badQuery()
+  const { personId, botId, operation, verdict, offset = 0, limit = 25 } = query
+  if (![personId, botId].every(value => value === undefined || id(value))
+      || (operation !== undefined && !auditOperations.includes(operation)) || (verdict !== undefined && !verdicts.includes(verdict))
+      || !Number.isSafeInteger(offset) || offset < 0 || offset > 1_000_000
+      || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw badQuery()
+  return { personId, botId, operation, verdict, offset, limit }
+}
+
+function validateView(event) {
+  const { type, ownerRequestId, personId, botId, time } = event
+  if (Object.keys(event).length !== 5 || type !== 'audit-view' || !id(ownerRequestId)
+      || !(personId === null || id(personId)) || !(botId === null || id(botId))
+      || !Number.isSafeInteger(time) || time < 0) throw invalid()
+  return { type, ownerRequestId, personId, botId, time }
+}
 const invalid = () => Object.assign(new Error('Invalid file audit storage or event'), { code: 'invalid-file-audit' })
 const id = value => typeof value === 'string' && value.length <= 256 && value.trim() !== ''
 
@@ -19,7 +42,7 @@ function validate(event) {
   const copy = Object.fromEntries(keys.map(key => [key, values[key].value]))
   const { personId, botId, roomId, sessionId, requestId, dispatchId, operation, ruleId, ruleVersion, verdict, outcome } = copy
   if (![personId, botId, sessionId, requestId, dispatchId].every(id) || !(roomId === null || id(roomId))
-      || !['create', 'modify', 'read'].includes(operation) || !['allowed', 'denied'].includes(verdict)
+      || !auditOperations.includes(operation) || !verdicts.includes(verdict)
       || (!(id(ruleId) && id(ruleVersion)) && !(verdict === 'denied' && ruleId === null && ruleVersion === null))
       || (effect && (verdict !== 'allowed' || !['completed', 'failed', 'unknown'].includes(outcome)))) throw invalid()
   return copy
@@ -29,7 +52,7 @@ function decode(bytes) {
   let state
   try { state = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) } catch { throw invalid() }
   if (!state || state.version !== 1 || !Array.isArray(state.events) || Object.keys(state).length !== 2) throw invalid()
-  return { version: 1, events: state.events.map(validate) }
+  return { version: 1, events: state.events.map(event => event?.type === 'audit-view' ? validateView(event) : validate(event)) }
 }
 
 // One service writer owns this file and its private local POSIX directory.
@@ -111,17 +134,45 @@ export async function openFileAuditStore(file, { initialize = false, maxBytes = 
     throw error
   }
 
-  async function writeAudit(event) {
+  function transact(change) {
     if (closed) throw invalid()
-    const copy = validate(event)
     const operation = tail.then(async () => {
       if (uncertain) throw invalid()
       const state = await load()
-      state.events.push(copy)
+      const result = change(state)
       await commit(state)
+      return result
     })
     tail = operation.catch(() => {})
     return operation
+  }
+
+  async function writeAudit(event) {
+    const copy = validate(event)
+    await transact(state => { state.events.push(copy) })
+  }
+
+  async function readAudit(query, ownerRequestId, authorize) {
+    const filters = readQuery(query)
+    if (!id(ownerRequestId) || typeof authorize !== 'function') throw invalid()
+    return transact(state => {
+      if (authorize() !== true) throw Object.assign(new Error('Audit read refused'), { code: 'not-authorized' })
+      const events = []
+      let matched = 0
+      let nextOffset = null
+      for (const event of state.events) {
+        if (event.type === 'audit-view' || filterKeys.some(key => filters[key] !== undefined && filters[key] !== event[key])) continue
+        if (matched++ < filters.offset) continue
+        if (events.length === filters.limit) {
+          nextOffset = filters.offset + events.length
+          break
+        }
+        events.push(event)
+      }
+      state.events.push(validateView({ type: 'audit-view', ownerRequestId,
+        personId: filters.personId ?? null, botId: filters.botId ?? null, time: Date.now() }))
+      return { events, nextOffset }
+    })
   }
 
   let closing
@@ -130,5 +181,5 @@ export async function openFileAuditStore(file, { initialize = false, maxBytes = 
     return closing ??= tail.then(() => { occupied.delete(path) })
   }
 
-  return { writeAudit, close }
+  return { writeAudit, readAudit, close }
 }
