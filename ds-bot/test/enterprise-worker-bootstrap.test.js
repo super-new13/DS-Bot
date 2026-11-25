@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import { openFileAuditStore } from '../src/host/enterprise/file-audit-store.js'
 import { openFileSettlementEvidence } from '../src/host/enterprise/file-settlement-evidence.js'
 import { createWorkerClient } from '../src/host/enterprise/worker-client.js'
 import { createWorkerBootstrap } from '../src/host/enterprise/worker-bootstrap.js'
@@ -75,6 +76,8 @@ test('admin configuration starts an isolated model worker and closes it on profi
   const transport = createWorkerTlsTransport({ ...tls.controller, origin })
   const client = createWorkerClient({ origin, nodeId: scope.nodeId, transport })
   await assert.rejects(client.create({ ...scope, botId: 'other' }), { code: 'worker-refused', status: 403 })
+  await assert.rejects(client.readAudit({ nodeId: scope.nodeId }, { ownerRequestId: 'refused-read', query: {} }),
+    { code: 'worker-refused', status: 403 })
   const owned = { ...scope, ...await client.create(scope) }
   const events = []
   const receipt = await client.submit(owned, 'bootstrap-request', 'mock input', { onEvent: event => events.push(event) })
@@ -354,3 +357,65 @@ test('bootstrap retains exact completion until trusted ingestion acknowledges it
       } finally { await restarted.fiber.dispose() }
     } finally { await center.close() }
   })
+
+test('audit-only peer reads paginated file audit and the worker records its owner request', { timeout: 10000 }, async t => {
+  const { profile, tls, scope, config } = fixture(t)
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'ds-bot-audit-target-')))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const { fingerprint } = config.peerGrants[0]
+  const auditFile = join(root, 'audit.json')
+  const event = { type: 'file-authorization', personId: scope.personId, botId: scope.botId, roomId: null,
+    sessionId: 'session', requestId: 'request', dispatchId: 'dispatch', operation: 'read',
+    ruleId: 'rule', ruleVersion: 'v1', verdict: 'allowed' }
+  const seed = await openFileAuditStore(auditFile, { initialize: true })
+  try {
+    await seed.writeAudit(event)
+    await seed.writeAudit({ ...event, dispatchId: 'second' })
+  } finally { await seed.close() }
+  const ready = Promise.withResolvers()
+  const adapter = new MockModel()
+  const auditOnly = { fingerprint, actions: ['audit'] }
+  for (const actions of [['create'], ['audit', 'status']]) {
+    assert.throws(() => createWorkerBootstrap({ config: { ...config, peerGrants: [{ fingerprint, actions }] }, adapter }), /Invalid administrator/)
+  }
+  assert.doesNotThrow(() => createWorkerBootstrap({ config: { ...config, peerGrants: [
+    { ...config.peerGrants[0], actions: ['create', 'audit'] },
+  ] }, adapter }))
+  await profile.plugin(createWorkerBootstrap({ config: { ...config, auditFile, peerGrants: [auditOnly] }, adapter,
+    onReady: ready.resolve, fileTools: { root, path: join(root, 'note'), workerOwned: true,
+      readRules: () => ({ version: 'v1', rules: [] }), isAuthorized: () => false, adjudicate: () => { throw new Error('Unexpected adjudication') },
+    },
+  }))
+  const { origin } = await ready.promise
+  const transport = createWorkerTlsTransport({ ...tls.controller, origin })
+  const client = createWorkerClient({ origin, nodeId: scope.nodeId, transport })
+  const query = { personId: scope.personId, operation: 'read', limit: 1 }
+  const result = await client.readAudit({ nodeId: scope.nodeId }, { ownerRequestId: 'owner-read-1', query })
+  assert.equal(Object.isFrozen(result), true)
+  assert.deepEqual(result, { events: [event], nextOffset: 1 })
+  const stored = JSON.parse(readFileSync(auditFile, 'utf8')).events
+  const { time, ...view } = stored.at(-1)
+  assert.ok(Number.isSafeInteger(time) && time > 0)
+  assert.deepEqual(view, { type: 'audit-view', ownerRequestId: 'owner-read-1', personId: scope.personId, botId: null })
+  await assert.rejects(client.readAudit({ nodeId: scope.nodeId }, { ownerRequestId: 'invalid-query', query: { limit: 101 } }),
+    { code: 'invalid-audit-query', status: 400 })
+  assert.equal(JSON.parse(readFileSync(auditFile, 'utf8')).events.length, 3)
+  await assert.rejects(client.create(scope), { code: 'worker-refused', status: 403 })
+})
+
+test('audit-only grant reports an unconfigured audit store over mTLS', { timeout: 8000 }, async t => {
+  const { profile, tls, scope, config } = fixture(t)
+  const ready = Promise.withResolvers()
+  const peerGrants = [{ fingerprint: config.peerGrants[0].fingerprint, actions: ['audit'] }]
+  await profile.plugin(createWorkerBootstrap({ config: { ...config, peerGrants }, adapter: new MockModel(), onReady: ready.resolve }))
+  const { origin } = await ready.promise
+  const transport = createWorkerTlsTransport({ ...tls.controller, origin })
+  const response = await transport(new Request(origin + '/internal/enterprise/worker/audit', { method: 'POST', redirect: 'error',
+    headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ownerRequestId: 'owner-read', query: {} }),
+  }))
+  assert.equal(response.status, 503)
+  assert.deepEqual(await response.json(), { error: 'worker-unavailable' })
+  const client = createWorkerClient({ origin, nodeId: scope.nodeId, transport })
+  await assert.rejects(client.readAudit({ nodeId: scope.nodeId }, { ownerRequestId: 'owner-read', query: {} }),
+    { code: 'worker-outcome-unknown' })
+})

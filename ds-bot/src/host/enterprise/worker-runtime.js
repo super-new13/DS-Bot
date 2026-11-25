@@ -15,7 +15,7 @@ const validId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.t
 // Transfer ownership of a dedicated, isolated DSH Context to this runtime.
 // Grants are live, synchronous checks against trusted worker configuration.
 export async function startLocalWorkerRuntime({ ctx, nodeId, provider, model, receiptPath, mappingPath, sessionRoot, initialize = false,
-  tls, host, port, origin, authorizePeer, authorizeSession, allowRooms = false, fileTools, limits = {} }) {
+  tls, host, port, origin, authorizePeer, authorizeSession, allowRooms = false, fileTools, audit, limits = {} }) {
   if (!ctx?.agents || !ctx.fiber || !validId(nodeId) || !provider?.trim() || !model?.trim()
       || typeof receiptPath !== 'string' || !isAbsolute(receiptPath)
       || typeof authorizePeer !== 'function' || typeof authorizeSession !== 'function' || typeof allowRooms !== 'boolean'
@@ -79,7 +79,7 @@ export async function startLocalWorkerRuntime({ ctx, nodeId, provider, model, re
       if (!await mapping.owns(scope)) throw Object.assign(new Error('Worker session refused'), { code: 'not-authorized' })
       return receipts.admit(scope, ...args)
     } } : receipts
-    handle = createWorkerHttpHandler({ nodeId, origin: listener.origin, worker, receipts: scopedReceipts, maxBodyBytes, maxActive, allowRooms,
+    handle = createWorkerHttpHandler({ nodeId, origin: listener.origin, worker, receipts: scopedReceipts, audit, maxBodyBytes, maxActive, allowRooms,
       authenticatePeer: peer => peer?.fingerprint,
       authorizePeer: (fingerprint, operation) => !closed && authorizePeer(fingerprint, operation) === true,
     })

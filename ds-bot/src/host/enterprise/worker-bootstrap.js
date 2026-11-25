@@ -7,7 +7,7 @@ import { openFileEffectOutbox } from './file-effect-outbox.js'
 import { apply as applyWorker } from './worker-plugin.js'
 import { snapshotFileOperations } from './worker-file-tools.js'
 
-const actions = new Set(['create', 'submit', 'cancel', 'status'])
+const actions = new Set(['create', 'submit', 'cancel', 'status', 'audit'])
 const id = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value)
 const absolute = path => typeof path === 'string' && isAbsolute(path)
 const invalid = () => new TypeError('Invalid administrator worker bootstrap configuration')
@@ -76,13 +76,15 @@ export function createWorkerBootstrap({ config, adapter, onReady, fileTools, ing
   if (![caPath, certPath, keyPath].every(absolute)) throw invalid()
   const grants = peerGrants.map(grant => {
     const { fingerprint, personId, botId, roomId, actions: allowed } = grant ?? {}
+    const auditOnly = Array.isArray(allowed) && allowed.every(action => action === 'audit')
+    const scoped = Object.hasOwn(grant ?? {}, 'personId') || Object.hasOwn(grant ?? {}, 'botId') || Object.hasOwn(grant ?? {}, 'roomId')
     if (typeof fingerprint !== 'string' || !/^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$/.test(fingerprint)
-        || !id(personId) || !id(botId) || (Object.hasOwn(grant ?? {}, 'roomId') && !id(roomId))
+        || ((!auditOnly || scoped) && (!id(personId) || !id(botId))) || (Object.hasOwn(grant ?? {}, 'roomId') && !id(roomId))
         || !Array.isArray(allowed) || !allowed.length
         || allowed.some(action => !actions.has(action))) throw invalid()
-    return { fingerprint, personId, botId, roomId, actions: new Set(allowed) }
+    return { fingerprint, personId, botId, roomId, auditOnly, actions: new Set(allowed) }
   })
-  const allowRooms = grants.some(grant => grant.roomId !== undefined)
+  const allowRooms = grants.some(grant => !grant.auditOnly && grant.roomId !== undefined)
   if (allowRooms && (!absolute(mappingPath) || !absolute(sessionRoot))) throw invalid()
   const matches = (grant, scope) => scope.nodeId === nodeId && grant.personId === scope.personId
     && grant.botId === scope.botId && grant.roomId === scope.roomId
@@ -94,8 +96,8 @@ export function createWorkerBootstrap({ config, adapter, onReady, fileTools, ing
         nodeId, provider, model, receiptPath, mappingPath, sessionRoot, initialize, host, port, origin, adapter, onReady, tls: { ca, cert, key },
         allowRooms, fileTools: trustedFileTools,
         authorizePeer: (fingerprint, { scope, action }) => grants.some(grant => grant.fingerprint === fingerprint
-          && matches(grant, scope) && grant.actions.has(action)),
-        authorizeSession: scope => grants.some(grant => matches(grant, scope)),
+          && grant.actions.has(action) && (action === 'audit' ? scope.nodeId === nodeId : matches(grant, scope))),
+        authorizeSession: scope => grants.some(grant => !grant.auditOnly && matches(grant, scope)),
       }
       if (auditFile === undefined && outboxFile === undefined) return applyWorker(profile, options)
 
@@ -130,7 +132,7 @@ export function createWorkerBootstrap({ config, adapter, onReady, fileTools, ing
         if (auditPath) audit = await openFileAuditStore(auditPath, { initialize })
         if (outboxPath) outbox = await openFileEffectOutbox(outboxPath, { initialize })
         const stopWorker = await applyWorker(profile, {
-          ...options,
+          ...options, audit,
           fileTools: { ...trustedFileTools, ...(audit && { writeAudit: audit.writeAudit }), ...(outbox && { onCompleted: outbox.onCompleted }) },
           onReady: outbox ? ready => onReady(Object.freeze({ ...ready, drainEvidence: limits => outbox.drain(ingestEvidence, limits) })) : onReady,
         })
